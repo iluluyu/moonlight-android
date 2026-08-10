@@ -24,6 +24,8 @@ import com.limelight.binding.input.touch.TrackpadContext;
 import com.limelight.binding.input.virtual_controller.VirtualController;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardController;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardLayoutController;
+import com.limelight.binding.input.shizuku.ShizukuInputBackend;
+import com.limelight.binding.input.shizuku.ShizukuKeyCapture;
 import com.limelight.binding.video.CrashListener;
 import com.limelight.binding.video.MediaCodecDecoderRenderer;
 import com.limelight.binding.video.MediaCodecHelper;
@@ -170,6 +172,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     private ControllerHandler controllerHandler;
     private KeyboardTranslator keyboardTranslator;
+    private ShizukuInputBackend shizukuInputBackend;
+    private boolean shizukuKeyboardActive;
     private VirtualController virtualController;
 
     private KeyBoardController keyBoardController;
@@ -1698,11 +1702,43 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         hideSystemUi(50);
     }
 
+    private void startShizukuKeyboardCapture() {
+        PreferenceConfiguration.KeyboardCaptureMode mode = prefConfig.keyboardCaptureMode;
+        if (mode == PreferenceConfiguration.KeyboardCaptureMode.OFF
+                || mode == PreferenceConfiguration.KeyboardCaptureMode.ACCESSIBILITY) {
+            LimeLog.info("Shizuku keyboard capture skipped (mode=" + mode + ")");
+            return;
+        }
+        if (ShizukuKeyCapture.isReady()) {
+            shizukuInputBackend = new ShizukuInputBackend();
+            // Only consume framework keyboard events once the UserService is actually
+            // connected and forwarding — otherwise a dead Shizuku process would silently
+            // swallow every key. The listener fires on the main thread.
+            shizukuInputBackend.setStateListener(active -> {
+                shizukuKeyboardActive = active;
+                LimeLog.info("Shizuku keyboard capture active=" + active);
+            });
+            shizukuInputBackend.start(conn);
+            LimeLog.info("Shizuku keyboard capture requested");
+        } else {
+            LimeLog.info("Shizuku not ready, using framework keyboard path");
+        }
+    }
+
+    private void stopShizukuKeyboardCapture() {
+        if (shizukuInputBackend != null) {
+            shizukuInputBackend.stop();
+            shizukuInputBackend = null;
+        }
+        shizukuKeyboardActive = false;
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
 
         instance = null;
+        stopShizukuKeyboardCapture();
         timerHandler.removeCallbacksAndMessages(null);
 
         if (prefConfig.enableFullExDisplay) handleDisplayRemoved();
@@ -2058,6 +2094,26 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return true;
         }
 
+        // When the Shizuku keyboard backend is active, it captures all keyboard input
+        // directly from evdev (bypassing ColorOS) and sends it to the host itself.
+        // Consume framework keyboard events here to avoid sending each key twice.
+        if (shizukuKeyboardActive && eventSource == InputDevice.SOURCE_KEYBOARD) {
+            return true;
+        }
+
+        // Some OEM keyboards wire the physical Esc key to a scanCode that Android
+        // reports as KEYCODE_BACK (Xiaomi Pad: scanCode 1, OPPO Pad 4 Pro: scanCode 158).
+        // Re-route those to the host as VK_ESCAPE so the Esc key works during streaming.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK &&
+                eventSource == InputDevice.SOURCE_KEYBOARD &&
+                (event.getScanCode() == 1 || event.getScanCode() == 158)) {
+            if (event.getRepeatCount() == 0) {
+                conn.sendKeyboardInput((short) KeyboardTranslator.VK_ESCAPE, KeyboardPacket.KEY_DOWN,
+                        getModifierState(event), (byte) 0);
+            }
+            return true;
+        }
+
         boolean handled = false;
 
         if (ControllerHandler.isGameControllerDevice(event.getDevice())) {
@@ -2145,6 +2201,24 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
             // Always return true, otherwise the back press will be propagated
             // up to the parent and finish the activity.
+            return true;
+        }
+
+        // When the Shizuku keyboard backend is active, it captures all keyboard input
+        // directly from evdev (bypassing ColorOS) and sends it to the host itself.
+        // Consume framework keyboard events here to avoid sending each key twice.
+        if (shizukuKeyboardActive && eventSource == InputDevice.SOURCE_KEYBOARD) {
+            return true;
+        }
+
+        // Some OEM keyboards wire the physical Esc key to a scanCode that Android
+        // reports as KEYCODE_BACK (Xiaomi Pad: scanCode 1, OPPO Pad 4 Pro: scanCode 158).
+        // Re-route those to the host as VK_ESCAPE so the Esc key works during streaming.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK &&
+                eventSource == InputDevice.SOURCE_KEYBOARD &&
+                (event.getScanCode() == 1 || event.getScanCode() == 158)) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_ESCAPE, KeyboardPacket.KEY_UP,
+                    getModifierState(event), (byte) 0);
             return true;
         }
 
@@ -3670,6 +3744,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
                 connected = true;
                 connecting = false;
+                startShizukuKeyboardCapture();
                 updatePipAutoEnter();
 
                 // Hide the mouse cursor now after a short delay.

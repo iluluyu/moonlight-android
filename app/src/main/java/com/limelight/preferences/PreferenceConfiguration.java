@@ -235,7 +235,12 @@ public class PreferenceConfiguration {
     public String customResolution;
     public String customRefreshRate;
     public int meteredBitrate;
+    public enum KeyboardCaptureMode {
+        AUTO, SHIZUKU, ACCESSIBILITY, OFF
+    }
+
     public FormatOption videoFormat;
+    public KeyboardCaptureMode keyboardCaptureMode;
     public int framePacingWarpFactor = 0;
     public int deadzonePercentage;
     public int oscOpacity;
@@ -709,6 +714,23 @@ private static int getFramePacingValue(Context context) {
                 Build.FINGERPRINT.contains("PPR1.180610.011/4079208_2235.1395");
     }
 
+    private static final String KEYBOARD_CAPTURE_MODE_PREF_STRING = "list_keyboard_capture_mode";
+    private static final String DEFAULT_KEYBOARD_CAPTURE_MODE = "auto";
+
+    private static KeyboardCaptureMode getKeyboardCaptureMode(Context context) {
+        SharedPreferences prefs = ProfilesManager.getInstance().getOverlayingSharedPreferences(context);
+        String str = prefs.getString(KEYBOARD_CAPTURE_MODE_PREF_STRING, DEFAULT_KEYBOARD_CAPTURE_MODE);
+        if ("shizuku".equals(str)) {
+            return KeyboardCaptureMode.SHIZUKU;
+        } else if ("accessibility".equals(str)) {
+            return KeyboardCaptureMode.ACCESSIBILITY;
+        } else if ("off".equals(str)) {
+            return KeyboardCaptureMode.OFF;
+        } else {
+            return KeyboardCaptureMode.AUTO;
+        }
+    }
+
     public static PreferenceConfiguration readPreferences(Context context) {
         return readPreferences(context, null);
     }
@@ -856,6 +878,7 @@ private static int getFramePacingValue(Context context) {
         config.videoScaleMode = getVideoScaleMode(context);
 
         config.videoFormat = getVideoFormatValue(context);
+        config.keyboardCaptureMode = getKeyboardCaptureMode(context);
         config.framePacing = getFramePacingValue(context);
         config.preferLowerDelays = getPreferLowerDelays(context);
 

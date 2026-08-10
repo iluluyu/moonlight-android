@@ -715,4 +715,19 @@
 
     <string name="title_checkbox_full_screen">启用全屏</string>
     <string name="summary_checkbox_full_screen">使用沉浸模式隐藏系统状态栏</string>
+
+    <!-- 物理键盘捕获后端 (Shizuku vs 无障碍) -->
+    <string name="title_keyboard_capture_mode">键盘捕获方式</string>
+    <string name="summary_keyboard_capture_mode">串流时如何捕获物理键盘（推荐 Shizuku，可屏蔽系统快捷键）</string>
+    <string name="title_keyboard_capture_status">当前使用的权限</string>
+    <string name="summary_keyboard_capture_status">正在检测…</string>
+    <string name="keyboard_capture_mode_auto">自动（优先 Shizuku）</string>
+    <string name="keyboard_capture_mode_shizuku">Shizuku（屏蔽系统快捷键）</string>
+    <string name="keyboard_capture_mode_accessibility">无障碍服务</string>
+    <string name="keyboard_capture_mode_off">关闭（仅框架）</string>
+    <string name="keyboard_capture_shizuku_granted">Shizuku：就绪（将被使用）</string>
+    <string name="keyboard_capture_shizuku_not_granted">Shizuku：%1$s（回退到无障碍/框架）</string>
+    <string name="keyboard_capture_status_shizuku">当前：Shizuku（内核独占抓取，屏蔽 OPPO Win→AI 等系统快捷键）</string>
+    <string name="keyboard_capture_status_accessibility">当前：无障碍服务</string>
+    <string name="keyboard_capture_status_framework">当前：框架（系统快捷键可能拦截按键）</string>
 </resources>

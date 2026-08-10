@@ -547,7 +547,7 @@ public class MediaCodecHelper {
         }
         if (tryNumber < 1) {
             // Official Android 11+ low latency option (KEY_LOW_LATENCY).
-            videoFormat.setInteger("low-latency", 1);
+            videoFormat.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
             setNewOption = true;
 
             // If this decoder officially supports FEATURE_LowLatency, we will just use that alone

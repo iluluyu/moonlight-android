@@ -480,6 +480,19 @@
             android:summary="@string/summary_enable_commit_text"
             android:title="@string/title_enable_commit_text"
             app:iconSpaceReserved="false" />
+        <ListPreference
+            android:defaultValue="auto"
+            android:entries="@array/keyboard_capture_mode_names"
+            android:entryValues="@array/keyboard_capture_mode_values"
+            android:key="list_keyboard_capture_mode"
+            android:summary="@string/summary_keyboard_capture_mode"
+            android:title="@string/title_keyboard_capture_mode"
+            app:iconSpaceReserved="false" />
+        <Preference
+            android:key="keyboard_capture_status"
+            android:summary="@string/summary_keyboard_capture_status"
+            android:title="@string/title_keyboard_capture_status"
+            app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

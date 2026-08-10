@@ -729,4 +729,19 @@
 
     <string name="title_checkbox_full_screen">Enable Full Screen</string>
     <string name="summary_checkbox_full_screen">Hide system bars with immersive mode</string>
+
+    <!-- Physical keyboard capture backend (Shizuku vs Accessibility) -->
+    <string name="title_keyboard_capture_mode">Keyboard capture</string>
+    <string name="summary_keyboard_capture_mode">How Artemis captures the physical keyboard during streaming</string>
+    <string name="title_keyboard_capture_status">Active backend</string>
+    <string name="summary_keyboard_capture_status">Determining…</string>
+    <string name="keyboard_capture_mode_auto">Auto (prefer Shizuku)</string>
+    <string name="keyboard_capture_mode_shizuku">Shizuku (blocks system shortcuts)</string>
+    <string name="keyboard_capture_mode_accessibility">Accessibility service</string>
+    <string name="keyboard_capture_mode_off">Off (framework only)</string>
+    <string name="keyboard_capture_shizuku_granted">Shizuku: ready (will be used)</string>
+    <string name="keyboard_capture_shizuku_not_granted">Shizuku: %1$s — accessibility/framework fallback</string>
+    <string name="keyboard_capture_status_shizuku">Backend: Shizuku (exclusive kernel grab, blocks OEM shortcuts like OPPO Win→AI)</string>
+    <string name="keyboard_capture_status_accessibility">Backend: Accessibility service</string>
+    <string name="keyboard_capture_status_framework">Backend: Framework (system shortcuts may intercept keys)</string>
 </resources>

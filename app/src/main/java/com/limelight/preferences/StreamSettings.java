@@ -334,6 +334,28 @@ public class StreamSettings extends AppCompatActivity {
 
         public void initializePreferences() {
             addPreferencesFromResource(R.xml.preferences);
+
+            // Show which keyboard-capture backend is currently in effect.
+            Preference captureStatus = findPreference("keyboard_capture_status");
+            if (captureStatus != null) {
+                com.limelight.binding.input.shizuku.ShizukuKeyCapture.State shizukuState =
+                        com.limelight.binding.input.shizuku.ShizukuKeyCapture.checkState();
+                String enabledServices = android.provider.Settings.Secure.getString(
+                        requireActivity().getContentResolver(),
+                        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                boolean accEnabled = enabledServices != null
+                        && enabledServices.contains(com.limelight.BuildConfig.APPLICATION_ID);
+                String summary;
+                if (shizukuState == com.limelight.binding.input.shizuku.ShizukuKeyCapture.State.GRANTED) {
+                    summary = getString(R.string.keyboard_capture_status_shizuku);
+                } else {
+                    summary = (accEnabled ? getString(R.string.keyboard_capture_status_accessibility)
+                                          : getString(R.string.keyboard_capture_status_framework))
+                            + "\n" + getString(R.string.keyboard_capture_shizuku_not_granted,
+                                                shizukuState.name());
+                }
+                captureStatus.setSummary(summary);
+            }
             PreferenceScreen screen = getPreferenceScreen();
 
             AppCompatActivity activity = (AppCompatActivity) requireActivity();
