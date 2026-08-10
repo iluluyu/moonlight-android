@@ -174,6 +174,74 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private KeyboardTranslator keyboardTranslator;
     private ShizukuInputBackend shizukuInputBackend;
     private boolean shizukuKeyboardActive;
+
+    // 3-finger gesture detection on the framework path (TP-PROBE proved ColorOS does
+    // NOT block these — the old #8 conclusion was wrong). Direct MotionEvent tracking.
+    private boolean gesture3Active = false;
+    private boolean gesture3PrevDown = false;
+    private long gesture3StartMs = 0;
+    private long gesture3LastFireMs = 0;
+    private float gesture3StartX = 0, gesture3StartY = 0;
+    private float gesture3LastX = 0, gesture3LastY = 0;
+    private float gesture3CumDX = 0, gesture3CumDY = 0;
+    private static final int TP3_SWIPE_X = 150;   // px of 3-finger centroid travel
+    private static final int TP3_SWIPE_Y = 120;
+    private static final long TP3_TAP_MAX_DURATION_MS = 300;
+    private static final int TP3_TAP_MAX_MOVE = 60;
+    private static final long TP3_COOLDOWN_MS = 400;
+
+    // Trackpad pinch-to-zoom state (2 fingers moving apart/together → Ctrl+wheel).
+    private float lastPinchDistance = 0f;
+    private float pinchLastX0 = 0f, pinchLastY0 = 0f, pinchLastX1 = 0f, pinchLastY1 = 0f;
+    private float pinchCumDot = 0f;
+    private boolean pinchZoomActive = false;
+    private float pendingPinchScroll = 0f;
+    // Pinch vs scroll discriminator: dot product of the two fingers' motion. Same
+    // direction (positive) = scroll; opposite (negative) = pinch. Robust on this OPPO
+    // trackpad where the framework's getClassification() always returns NONE.
+    private static final float PINCH_SCROLL_DOT_THRESHOLD = 800f;
+    private static final float PINCH_NOTCH_UNITS = 30f;        // scroll granularity (quarter of a wheel notch)
+
+    // Trackpad gesture "native feel": after 3-finger up opens Windows Task View
+    // (Win+Tab), left/right/up/down swipes navigate it with arrow keys; tap selects.
+    private boolean taskViewMode = false;
+    private long taskViewModeUntil = 0;
+    private static final long TASK_VIEW_TIMEOUT_MS = 4000;
+
+    // Native-feel Alt+Tab switcher: Alt is held while the user cycles apps (each
+    // swipe = one Tab). Release is gesture-driven, not a long timer: Alt closes a
+    // short animation tail after the fingers lift, and a new 3-finger gesture within
+    // that tail cancels the release so rapid swipes keep the switcher open.
+    private boolean altTabActive = false;
+    private static final long ALT_TAB_RELEASE_TAIL_MS = 500;
+    private final Runnable releaseAltTabRunnable = new Runnable() {
+        @Override
+        public void run() {
+            timerHandler.removeCallbacks(altTabSafetyRunnable);
+            if (altTabActive) {
+                conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_UP,
+                        (byte) 0, (byte) 0);
+                altTabActive = false;
+                LimeLog.info("Alt+Tab switcher closed");
+            }
+        }
+    };
+    /** Failsafe: if the gesture-driven release was ever missed, never leave Alt stuck
+     *  down (which would wedge the switcher open). This is a robustness guard, not a
+     *  UX timer — it only fires when the normal path failed. */
+    private static final long ALT_TAB_SAFETY_TIMEOUT_MS = 3000;
+    private final Runnable altTabSafetyRunnable = new Runnable() {
+        @Override
+        public void run() {
+            timerHandler.removeCallbacks(releaseAltTabRunnable);
+            if (altTabActive) {
+                conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_UP,
+                        (byte) 0, (byte) 0);
+                altTabActive = false;
+                LimeLog.warning("Alt+Tab safety release (stuck guard)");
+            }
+        }
+    };
     private VirtualController virtualController;
 
     private KeyBoardController keyBoardController;
@@ -1718,6 +1786,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 LimeLog.info("Shizuku keyboard capture active=" + active);
             });
             shizukuInputBackend.setSpecialComboListener(key -> runOnUiThread(() -> handleShizukuSpecialCombo(key)));
+            shizukuInputBackend.setGestureListener(gesture -> runOnUiThread(() -> handleTrackpadGesture(gesture)));
             shizukuInputBackend.startReading(conn);
             LimeLog.info("Shizuku keyboard capture requested");
         } else {
@@ -1731,6 +1800,131 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
         shizukuKeyboardActive = false;
     }
+
+    /** Maps trackpad multi-finger gestures (detected via Shizuku evdev, bypassing
+     *  ColorOS) to Windows shortcuts. */
+    private void handleTrackpadGesture(int gestureType) {
+        // Expire Task View navigation mode after a timeout; any gesture while active
+        // keeps it alive so the user can keep swiping to pick a window.
+        if (taskViewMode && System.currentTimeMillis() > taskViewModeUntil) {
+            taskViewMode = false;
+        }
+        if (taskViewMode) {
+            taskViewModeUntil = System.currentTimeMillis() + TASK_VIEW_TIMEOUT_MS;
+        }
+
+        switch (gestureType) {
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT:
+                if (taskViewMode) {
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_LEFT });
+                } else {
+                    // Previous app (Alt+Shift+Tab) with the switcher held open.
+                    ensureAltTabHeld();
+                    sendTabWhileSwitching(true);
+                }
+                break;
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT:
+                if (taskViewMode) {
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_RIGHT });
+                } else {
+                    ensureAltTabHeld();
+                    sendTabWhileSwitching(false); // next app (Alt+Tab)
+                }
+                break;
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP:
+                if (taskViewMode) {
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_UP });
+                } else {
+                    // Open Task View and enter navigation mode (all four directions pick).
+                    releaseAltTab();
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_TAB });
+                    taskViewMode = true;
+                    taskViewModeUntil = System.currentTimeMillis() + TASK_VIEW_TIMEOUT_MS;
+                }
+                break;
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN:
+                if (taskViewMode) {
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_DOWN });
+                } else {
+                    releaseAltTab();
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_D });
+                    taskViewMode = false;
+                }
+                break;
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP:
+                if (taskViewMode) {
+                    sendKeys(new short[] { (short) KeyboardTranslator.VK_RETURN }); // select
+                    taskViewMode = false;
+                } else if (altTabActive) {
+                    releaseAltTab(); // select the highlighted app
+                } else {
+                    // Quick switch.
+                    ensureAltTabHeld();
+                    sendTabWhileSwitching(false);
+                }
+                break;
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START:
+                // Three fingers landed. Deliberately no action here: cancelling the
+                // release on START alone could leave Alt stuck if a later END/swipe
+                // event was missed. The per-swipe tail re-arm handles rapid swipes,
+                // and the safety timeout is the backstop.
+                break;
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END:
+                // Fingers lifted: close the switcher after the animation tail.
+                if (altTabActive) {
+                    timerHandler.removeCallbacks(releaseAltTabRunnable);
+                    timerHandler.postDelayed(releaseAltTabRunnable, ALT_TAB_RELEASE_TAIL_MS);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** Opens the Alt+Tab switcher (Alt down) and keeps it open while the user cycles;
+     *  each swipe re-arms a release timer so the switcher closes (with its animation)
+     *  only after the user stops swiping. */
+    private void ensureAltTabHeld() {
+        if (!altTabActive) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_DOWN,
+                    KeyboardPacket.MODIFIER_ALT, (byte) 0);
+            altTabActive = true;
+            LimeLog.info("Alt+Tab switcher opened");
+            timerHandler.postDelayed(altTabSafetyRunnable, ALT_TAB_SAFETY_TIMEOUT_MS);
+        }
+        timerHandler.removeCallbacks(releaseAltTabRunnable);
+        timerHandler.postDelayed(releaseAltTabRunnable, ALT_TAB_RELEASE_TAIL_MS);
+    }
+
+    /** Closes the Alt+Tab switcher immediately (Alt up). */
+    private void releaseAltTab() {
+        timerHandler.removeCallbacks(releaseAltTabRunnable);
+        timerHandler.removeCallbacks(altTabSafetyRunnable);
+        if (altTabActive) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_UP,
+                    (byte) 0, (byte) 0);
+            altTabActive = false;
+            LimeLog.info("Alt+Tab switcher closed");
+        }
+    }
+
+    /** Sends one Tab press while the Alt+Tab switcher is open (Alt already held).
+     *  Left swipe uses Alt+Shift+Tab (previous app) via a Shift press around the Tab. */
+    private void sendTabWhileSwitching(boolean withShift) {
+        byte mod = KeyboardPacket.MODIFIER_ALT;
+        if (withShift) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_LSHIFT, KeyboardPacket.KEY_DOWN,
+                    (byte) (KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT), (byte) 0);
+            mod = (byte) (KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT);
+        }
+        conn.sendKeyboardInput((short) KeyboardTranslator.VK_TAB, KeyboardPacket.KEY_DOWN, mod, (byte) 0);
+        conn.sendKeyboardInput((short) KeyboardTranslator.VK_TAB, KeyboardPacket.KEY_UP, mod, (byte) 0);
+        if (withShift) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_LSHIFT, KeyboardPacket.KEY_UP,
+                    KeyboardPacket.MODIFIER_ALT, (byte) 0);
+        }
+    }
+
 
     /** Handles Ctrl+Alt+Shift+Q/Z/C pressed via the Shizuku keyboard backend. The
      *  exclusive evdev grab stops these from reaching handleKeyDown (where
@@ -1765,6 +1959,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         instance = null;
         stopShizukuKeyboardCapture();
+        releaseAltTab();
+        endPinchZoom();
         com.limelight.binding.input.touch.TrackpadContext.primaryButtonDown = false;
         timerHandler.removeCallbacksAndMessages(null);
 
@@ -3169,6 +3365,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // This case is for fingers
             else {
                 if (eventSource == InputDevice.SOURCE_TOUCHPAD) {
+                    if (handleTrackpadGestures(event)) {
+                        return true;
+                    }
+                    if (handleTrackpadPinch(event)) {
+                        return true;
+                    }
                     return handleTouchInput(event, trackpadContextMap, false);
                 } else {
                     if (virtualController != null &&
@@ -3222,6 +3424,171 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         // Unknown class
         return false;
+    }
+
+    /** Detects 3-finger swipes/taps directly from framework MotionEvents (the events
+     *  DO reach us — re-verified). Returns true to consume 3-finger events entirely
+     *  (they are gesture-only; the 2-slot TrackpadContext can't use them anyway). */
+    private boolean handleTrackpadGestures(MotionEvent event) {
+        int pc = event.getPointerCount();
+        long now = System.currentTimeMillis();
+
+        if (pc >= 3) {
+            if (!gesture3PrevDown) {
+                gesture3PrevDown = true;
+                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START);
+            }
+
+            // Update centroid (use the first 3 pointers; extra fingers are ignored).
+            float cx = (event.getX(0) + event.getX(1) + event.getX(2)) / 3f;
+            float cy = (event.getY(0) + event.getY(1) + event.getY(2)) / 3f;
+
+            if (!gesture3Active) {
+                if (now - gesture3LastFireMs > TP3_COOLDOWN_MS) {
+                    gesture3Active = true;
+                    gesture3StartMs = now;
+                    gesture3StartX = gesture3LastX = cx;
+                    gesture3StartY = gesture3LastY = cy;
+                    gesture3CumDX = gesture3CumDY = 0;
+                }
+                return true; // consume 3-finger events
+            }
+
+            if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                gesture3CumDX += cx - gesture3LastX;
+                gesture3CumDY += cy - gesture3LastY;
+                gesture3LastX = cx;
+                gesture3LastY = cy;
+                if (Math.abs(gesture3CumDX) > TP3_SWIPE_X
+                        && Math.abs(gesture3CumDX) > Math.abs(gesture3CumDY) * 1.5f) {
+                    handleTrackpadGesture(gesture3CumDX > 0
+                            ? com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT
+                            : com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT);
+                    gesture3LastFireMs = now;
+                    gesture3Active = false;
+                } else if (Math.abs(gesture3CumDY) > TP3_SWIPE_Y
+                        && Math.abs(gesture3CumDY) > Math.abs(gesture3CumDX) * 1.5f) {
+                    handleTrackpadGesture(gesture3CumDY > 0
+                            ? com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN
+                            : com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP);
+                    gesture3LastFireMs = now;
+                    gesture3Active = false;
+                }
+            }
+            return true; // consume 3-finger events
+        }
+
+        // Fewer than 3 fingers.
+        if (gesture3PrevDown) {
+            gesture3PrevDown = false;
+            handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
+            if (gesture3Active) {
+                long dur = now - gesture3StartMs;
+                float move = Math.abs(gesture3LastX - gesture3StartX)
+                        + Math.abs(gesture3LastY - gesture3StartY);
+                if (dur < TP3_TAP_MAX_DURATION_MS && move < TP3_TAP_MAX_MOVE) {
+                    handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP);
+                }
+                gesture3Active = false;
+            }
+        }
+        return false;
+    }
+
+    /** Detect a two-finger pinch on the trackpad and translate it to Ctrl+wheel zoom.
+     *  Returns true if the event was consumed as a pinch (suppresses 2-finger scroll).
+     *  Discriminator: the dot product of the two fingers' motion vectors. A scroll
+     *  moves both fingers in the same direction (positive dot), a pinch in opposite
+     *  directions (negative dot). This is far more robust than separation-change
+     *  heuristics on this OPPO trackpad (where framework classification is NONE). */
+    private boolean handleTrackpadPinch(MotionEvent event) {
+        int action = event.getActionMasked();
+        int pc = event.getPointerCount();
+
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP
+                || action == MotionEvent.ACTION_CANCEL) {
+            resetPinchState();
+            return false;
+        }
+
+        if (pc != 2 || action != MotionEvent.ACTION_MOVE) {
+            if (pc < 2) {
+                resetPinchState();
+            }
+            return false;
+        }
+
+        float x0 = event.getX(0), y0 = event.getY(0);
+        float x1 = event.getX(1), y1 = event.getY(1);
+        float dist = (float) Math.sqrt((x0 - x1) * (x0 - x1) + (y0 - y1) * (y0 - y1));
+
+        if (lastPinchDistance == 0f) {
+            // First move frame: seed finger positions and separation baseline.
+            pinchLastX0 = x0; pinchLastY0 = y0;
+            pinchLastX1 = x1; pinchLastY1 = y1;
+            lastPinchDistance = dist;
+            pinchCumDot = 0f;
+            return false;
+        }
+
+        float dDist = dist - lastPinchDistance;
+        lastPinchDistance = dist;
+
+        float dx0 = x0 - pinchLastX0, dy0 = y0 - pinchLastY0;
+        float dx1 = x1 - pinchLastX1, dy1 = y1 - pinchLastY1;
+        pinchLastX0 = x0; pinchLastY0 = y0;
+        pinchLastX1 = x1; pinchLastY1 = y1;
+        // Same direction → positive dot (scroll); opposite → negative dot (pinch).
+        pinchCumDot += dx0 * dx1 + dy0 * dy1;
+
+        if (!pinchZoomActive) {
+            if (pinchCumDot > PINCH_SCROLL_DOT_THRESHOLD) {
+                // Fingers clearly moving together — a scroll, not a pinch.
+                resetPinchState();
+                return false;
+            }
+            if (pinchCumDot < -PINCH_SCROLL_DOT_THRESHOLD) {
+                // Fingers clearly opposing — a pinch.
+                conn.sendKeyboardInput((short) KeyboardTranslator.VK_LCONTROL, KeyboardPacket.KEY_DOWN,
+                        KeyboardPacket.MODIFIER_CTRL, (byte) 0);
+                pinchZoomActive = true;
+                LimeLog.info("Pinch zoom started");
+            } else {
+                return false; // undetermined yet — let the normal path handle this frame
+            }
+        }
+
+        // Dead zone: discard sub-3px per-frame jitter so the zoom doesn't pulse.
+        if (Math.abs(dDist) < 3f) {
+            return true;
+        }
+
+        // Send accumulated separation change in discrete notches so the host doesn't get
+        // a flood of tiny scroll packets every frame (which caused stutter).
+        pendingPinchScroll += dDist;
+        int notches = (int) (pendingPinchScroll / PINCH_NOTCH_UNITS);
+        if (notches != 0) {
+            conn.sendMouseHighResScroll((short) (notches * PINCH_NOTCH_UNITS));
+            pendingPinchScroll -= notches * PINCH_NOTCH_UNITS;
+        }
+        return true;
+    }
+
+    private void resetPinchState() {
+        endPinchZoom();
+        lastPinchDistance = 0f;
+        pendingPinchScroll = 0f;
+        pinchCumDot = 0f;
+        pinchLastX0 = pinchLastY0 = pinchLastX1 = pinchLastY1 = 0f;
+    }
+
+    private void endPinchZoom() {
+        if (pinchZoomActive) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_LCONTROL, KeyboardPacket.KEY_UP,
+                    (byte) 0, (byte) 0);
+            pinchZoomActive = false;
+            LimeLog.info("Pinch zoom ended");
+        }
     }
 
     private boolean handleTouchInput(MotionEvent event, TouchContext[] inputContextMap, boolean isTouchScreen) {

@@ -47,18 +47,20 @@ public class TrackpadContext implements TouchContext {
     private float sensitivityX = 1;
     private float sensitivityY = 1;
 
-    private static final int TAP_MOVEMENT_THRESHOLD = 30;
-    private static final int TAP_TIME_THRESHOLD = 230;
+    private static final int TAP_MOVEMENT_THRESHOLD = 10; // px (libinput: ~1.3mm tap window)
+    private static final int TAP_TIME_THRESHOLD = 180;    // ms (libinput default tap timeout)
     private static final int CLICK_RELEASE_DELAY = TAP_TIME_THRESHOLD;
-    private static final int SCROLL_SPEED_FACTOR_X = 2;
-    private static final int SCROLL_SPEED_FACTOR_Y = 3;
+    private static final float SCROLL_SPEED_FACTOR_X = 1.5f;
+    private static final float SCROLL_SPEED_FACTOR_Y = 2f;
     private static final double ACCELERATION_THRESHOLD = 8.0;
-    private static final double FLICK_FRICTION = 0.93;
+    // Apple UIScrollView normal deceleration ≈ 0.998/ms ⇒ 0.98 per 10ms (τ≈500ms);
+    // 0.93 was an abrupt ~138ms stop.
+    private static final double FLICK_FRICTION = 0.98;
     // Unit: pixels/ms.
     private static final double FLICK_THRESHOLD = 0.8;
     private static final int MOMENTUM_FRAME_INTERVAL_MS = 10;
     private static final int FLICK_VELOCITY_DECAY_TIMEOUT_MS = 50;
-    private static final int SCROLL_TRANSITION_TIMEOUT_MS = 200;
+    private static final int SCROLL_TRANSITION_TIMEOUT_MS = 60;
     /** A second tap must linger this long (without significant movement) before a
      *  double-tap-and-drag activates, so a quick "tap then move the cursor" is not
      *  mistaken for a drag (which previously left the left button stuck down). */
@@ -376,7 +378,18 @@ public class TrackpadContext implements TouchContext {
             int absDeltaX, absDeltaY;
 
             double magnitude = Math.sqrt(rawDeltaX * rawDeltaX + rawDeltaY * rawDeltaY);
-            double precisionMultiplier = Math.cbrt(magnitude / ACCELERATION_THRESHOLD);
+            // Acceleration curve (Mac-like): ~1:1 at low speed for precise tracking,
+            // a gentle log ramp mid-speed, capped so fast swipes don't "fly".
+            double precisionMultiplier;
+            if (magnitude <= ACCELERATION_THRESHOLD) {
+                precisionMultiplier = 1.0;
+            } else if (magnitude <= 40.0) {
+                double log2 = Math.log(2);
+                precisionMultiplier = 1.0 + 1.5 * (Math.log(magnitude / ACCELERATION_THRESHOLD) / log2)
+                        / (Math.log(40.0 / ACCELERATION_THRESHOLD) / log2);
+            } else {
+                precisionMultiplier = 2.5;
+            }
 
             float deltaX, deltaY;
             if (swapAxis) {
