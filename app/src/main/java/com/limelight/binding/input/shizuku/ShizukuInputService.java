@@ -46,7 +46,37 @@ public class ShizukuInputService extends IInputEventService.Stub {
 
     private static native int nativeOpenKeyboardGrabbed(String path);
 
+    // Gesture types reported via IInputEventCallback.onTrackpadGesture.
+    public static final int GESTURE_SWIPE_LEFT = 1;
+    public static final int GESTURE_SWIPE_RIGHT = 2;
+    public static final int GESTURE_SWIPE_UP = 3;
+    public static final int GESTURE_SWIPE_DOWN = 4;
+    public static final int GESTURE_TAP = 5;
+    // Lifecycle: 3 fingers landed / lifted (used to bind Alt+Tab to the physical
+    // gesture like Windows does, instead of timers).
+    public static final int GESTURE_START = 6;
+    public static final int GESTURE_END = 7;
+
+    // ABS_MT multitouch codes.
+    private static final int EV_SYN = 0x00;
+    private static final int SYN_REPORT = 0x00;
+    private static final int EV_ABS = 0x03;
+    private static final int ABS_MT_SLOT = 0x2f;
+    private static final int ABS_MT_POSITION_X = 0x35;
+    private static final int ABS_MT_POSITION_Y = 0x36;
+    private static final int ABS_MT_TRACKING_ID = 0x39;
+    private static final int MAX_SLOTS = 20;
+    private static final int GESTURE_FINGERS = 3;
+    private static final int SWIPE_X_THRESHOLD = 150; // raw ABS units
+    private static final int SWIPE_Y_THRESHOLD = 120;
+    private static final long TAP_MAX_DURATION_MS = 180; // libinput-style tap window
+    private static final int TAP_MAX_MOVE = 30;
+    private static final long GESTURE_COOLDOWN_MS = 400;
+
+    private static native int nativeOpenTrackpadObserver(String path);
+
     private final List<ParcelFileDescriptor> grabbedPfds = new ArrayList<>();
+    private final List<ParcelFileDescriptor> trackpadPfds = new ArrayList<>();
     private final List<FileInputStream> plainStreams = new ArrayList<>();
     private volatile boolean running = false;
     /** Latest callback; readers read this field so a rebind (start() called again while
@@ -116,6 +146,139 @@ public class ShizukuInputService extends IInputEventService.Stub {
                 + " grabbed=" + grabbed + " readable=" + readable);
     }
 
+    /** Reads ABS_MT multitouch from a trackpad (no grab) and detects 3-finger
+     *  swipes/taps that ColorOS swallows at the framework level. Reports gestures via
+     *  {@link #report(int)}. */
+    private void startTrackpadReader(InputStream in) {
+        Thread t = new Thread(() -> {
+            int[] slotId = new int[MAX_SLOTS];
+            int[] slotX = new int[MAX_SLOTS];
+            int[] slotY = new int[MAX_SLOTS];
+            java.util.Arrays.fill(slotId, -1);
+            int currentSlot = 0;
+            boolean gestureActive = false;
+            long gestureStartMs = 0;
+            long lastFireMs = 0;
+            int prevFingerCount = 0;
+            float startX = 0, startY = 0;
+            float lastX = 0, lastY = 0;
+            float cumDX = 0, cumDY = 0;
+
+            ByteBuffer bb = ByteBuffer.allocate(INPUT_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN);
+            byte[] buf = bb.array();
+            try {
+                while (running) {
+                    int n = in.read(buf);
+                    if (n < 0) {
+                        break;
+                    }
+                    if (n != INPUT_EVENT_SIZE) {
+                        continue;
+                    }
+                    int type = bb.getShort(16) & 0xFFFF;
+                    int code = bb.getShort(18) & 0xFFFF;
+                    int value = bb.getInt(20);
+
+                    if (type == EV_ABS) {
+                        if (code == ABS_MT_SLOT) {
+                            currentSlot = value;
+                        } else if (code == ABS_MT_TRACKING_ID) {
+                            if (currentSlot >= 0 && currentSlot < MAX_SLOTS) {
+                                slotId[currentSlot] = value;
+                            }
+                        } else if (code == ABS_MT_POSITION_X) {
+                            if (currentSlot >= 0 && currentSlot < MAX_SLOTS) {
+                                slotX[currentSlot] = value;
+                            }
+                        } else if (code == ABS_MT_POSITION_Y) {
+                            if (currentSlot >= 0 && currentSlot < MAX_SLOTS) {
+                                slotY[currentSlot] = value;
+                            }
+                        }
+                    } else if (type == EV_SYN && code == SYN_REPORT) {
+                        int count = 0;
+                        float cx = 0, cy = 0;
+                        for (int i = 0; i < MAX_SLOTS; i++) {
+                            if (slotId[i] >= 0) {
+                                count++;
+                                cx += slotX[i];
+                                cy += slotY[i];
+                            }
+                        }
+                        if (count > 0) {
+                            cx /= count;
+                            cy /= count;
+                        }
+                        long now = System.currentTimeMillis();
+
+                        // Report the physical gesture lifecycle (3 fingers down / up)
+                        // so the app can bind Alt+Tab to it natively.
+                        if (prevFingerCount < GESTURE_FINGERS && count >= GESTURE_FINGERS) {
+                            report(GESTURE_START);
+                        } else if (prevFingerCount >= GESTURE_FINGERS && count < GESTURE_FINGERS) {
+                            report(GESTURE_END);
+                        }
+                        prevFingerCount = count;
+
+                        if (count >= GESTURE_FINGERS) {
+                            if (!gestureActive) {
+                                // Only start a new gesture after a cooldown so a long
+                                // swipe doesn't re-trigger from the same hand motion.
+                                if (now - lastFireMs > GESTURE_COOLDOWN_MS) {
+                                    gestureActive = true;
+                                    gestureStartMs = now;
+                                    startX = lastX = cx;
+                                    startY = lastY = cy;
+                                    cumDX = cumDY = 0;
+                                }
+                            } else {
+                                cumDX += cx - lastX;
+                                cumDY += cy - lastY;
+                                lastX = cx;
+                                lastY = cy;
+                                if (Math.abs(cumDX) > SWIPE_X_THRESHOLD
+                                        && Math.abs(cumDX) > Math.abs(cumDY) * 1.5f) {
+                                    report(cumDX > 0 ? GESTURE_SWIPE_RIGHT : GESTURE_SWIPE_LEFT);
+                                    lastFireMs = now;
+                                    gestureActive = false;
+                                } else if (Math.abs(cumDY) > SWIPE_Y_THRESHOLD
+                                        && Math.abs(cumDY) > Math.abs(cumDX) * 1.5f) {
+                                    report(cumDY > 0 ? GESTURE_SWIPE_DOWN : GESTURE_SWIPE_UP);
+                                    lastFireMs = now;
+                                    gestureActive = false;
+                                }
+                            }
+                        } else if (gestureActive) {
+                            // Fingers lifted (or dropped below 3): was it a tap?
+                            long dur = now - gestureStartMs;
+                            float move = Math.abs(lastX - startX) + Math.abs(lastY - startY);
+                            if (dur < TAP_MAX_DURATION_MS && move < TAP_MAX_MOVE) {
+                                report(GESTURE_TAP);
+                            }
+                            gestureActive = false;
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                // fd closed during stop() — expected shutdown path.
+            }
+        });
+        t.setName("trackpad-gesture");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void report(int gestureType) {
+        final IInputEventCallback c = cb;
+        if (c != null) {
+            try {
+                c.onTrackpadGesture(gestureType);
+                Log.i(TAG, "gesture=" + gestureType);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     private void startReader(InputStream in, String path) {
         Thread t = new Thread(() -> {
             ByteBuffer bb = ByteBuffer.allocate(INPUT_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN);
@@ -164,6 +327,13 @@ public class ShizukuInputService extends IInputEventService.Stub {
             }
         }
         grabbedPfds.clear();
+        for (ParcelFileDescriptor pfd : trackpadPfds) {
+            try {
+                pfd.close();
+            } catch (Exception ignored) {
+            }
+        }
+        trackpadPfds.clear();
         for (FileInputStream fis : plainStreams) {
             try {
                 fis.close();
