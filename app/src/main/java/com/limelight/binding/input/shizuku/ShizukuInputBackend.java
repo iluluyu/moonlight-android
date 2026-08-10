@@ -13,25 +13,41 @@ import com.limelight.utils.KeyMapper;
 import rikka.shizuku.Shizuku;
 
 /**
- * App-side manager for the Shizuku keyboard-capture backend. Binds a
- * {@link ShizukuInputService} UserService, receives raw evdev key events, and
- * translates them into host keyboard packets via {@link KeyMapper} (Linux keycode
- * -> Windows VK), tracking modifier state along the way.
+ * App-side manager for the Shizuku keyboard-capture backend.
  *
- * <p>This bypasses ColorOS framework-level key interception (the value over the
- * AccessibilityService path). KEY_BACK (158) is remapped to VK_ESCAPE so the OPPO
- * keyboard's physical Esc key works, matching the fix in {@code Game.handleKeyDown}.
+ * <p><b>Lifecycle:</b> the UserService is bound <i>once</i> (persistent singleton) and
+ * kept alive; each stream simply calls {@link #startReading}/{@link #stopReading} to
+ * toggle the exclusive keyboard grab and reader threads on/off in the SAME process.
+ * Earlier designs unbound/rebound per stream, which churned the UserService process,
+ * left stale processes holding the keyboard grab, and silently dropped keys on the
+ * Nth stream.
  *
- * <p><b>Important:</b> reading evdev via Shizuku is a <i>parallel</i> capture — it
- * does NOT block the framework from also acting on a key (so OPPO's global Win→AI
- * shortcut still fires; that must be disabled in OPPO settings). It only guarantees
- * the raw keypress reaches the host even when ColorOS would otherwise eat it.
+ * <p>Raw evdev key events are translated to host keyboard packets via
+ * {@link KeyMapper} (Linux keycode -> Windows VK), with modifier tracking and
+ * KEY_BACK (158) -> VK_ESCAPE for the OPPO Esc key. App-internal combos
+ * (Ctrl+Alt+Shift+Q/Z/C) are detected here and forwarded via
+ * {@link SpecialComboListener}, since the exclusive grab stops them from reaching
+ * {@code Game.handleKeyDown}.
  */
 public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
-    /** Notified (on the main thread) when the UserService actually connects/disconnects. */
+    /** Notified (main thread) when capture becomes active/inactive. */
     public interface StateListener {
         void onActiveChanged(boolean active);
+    }
+
+    /** Notified when an app-internal combo (Ctrl+Alt+Shift+Q/Z/C) is pressed. */
+    public interface SpecialComboListener {
+        void onSpecialCombo(int linuxKeyCode);
+    }
+
+    private static ShizukuInputBackend instance;
+
+    public static synchronized ShizukuInputBackend getInstance() {
+        if (instance == null) {
+            instance = new ShizukuInputBackend();
+        }
+        return instance;
     }
 
     // Linux evdev key codes used for modifier tracking.
@@ -41,79 +57,103 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
     private static final int KEY_LEFTMETA = 125, KEY_RIGHTMETA = 126;
     private static final int KEY_BACK = 158; // OPPO keyboard wires the physical Esc key here
     private static final short VK_ESCAPE = 27;
-
-    // TEMP(diag): log every forwarded key event. Flip to true to debug capture.
-    private static final boolean LOG_SENDS = false;
+    // Artemis app-internal combos: Ctrl+Alt+Shift + Q(quit)/Z(grab)/C(cursor).
+    private static final int KEY_Q = 16, KEY_Z = 44, KEY_C = 46;
+    private static final byte SPECIAL_COMBO_MODS =
+            KeyboardPacket.MODIFIER_CTRL | KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT;
 
     private NvConnection conn;
     private volatile byte modifierState = 0;
     private IInputEventService service;
     private boolean bound = false;
+    private volatile boolean started = false;
     private volatile boolean active = false;
     private Shizuku.UserServiceArgs userServiceArgs;
     private StateListener stateListener;
-    private final boolean logRawEvents;
+    private SpecialComboListener specialComboListener;
+
+    private ShizukuInputBackend() {
+    }
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
             service = IInputEventService.Stub.asInterface(binder);
-            try {
-                service.start(ShizukuInputBackend.this);
-                active = true;
-                LimeLog.info("ShizukuInputBackend: UserService connected & started (now active)");
-                notifyState();
-            } catch (Exception e) {
-                LimeLog.warning("ShizukuInputBackend: start() failed: " + e);
-                active = false;
-                notifyState();
+            if (started) {
+                // Shizuku can deliver this callback more than once per bind; ignore
+                // duplicates. Real reconnects reset started in onServiceDisconnected.
+                return;
+            }
+            // If a stream is already active, begin reading right away.
+            if (conn != null) {
+                startServiceIfNeeded();
             }
         }
 
         @Override
         public void onServiceDisconnected(ComponentName name) {
             service = null;
+            started = false;
             active = false;
             LimeLog.warning("ShizukuInputBackend: UserService disconnected (no longer active)");
             notifyState();
         }
     };
 
-    public ShizukuInputBackend() {
-        this(false);
-    }
-
-    /** @param logRawEvents TEMP diagnostic: log every raw evdev event (no conn needed). */
-    public ShizukuInputBackend(boolean logRawEvents) {
-        this.logRawEvents = logRawEvents;
-    }
-
     public void setStateListener(StateListener listener) {
         this.stateListener = listener;
     }
 
-    /** True only once the UserService is bound and forwarding events. */
-    public boolean isActive() {
-        return active;
+    public void setSpecialComboListener(SpecialComboListener listener) {
+        this.specialComboListener = listener;
     }
 
-    private void notifyState() {
-        final StateListener l = stateListener;
-        if (l != null) {
-            l.onActiveChanged(active);
+    /** Begin capturing for a stream. Binds the UserService once (persistent). */
+    public synchronized void startReading(NvConnection conn) {
+        this.conn = conn;
+        if (bound && service != null) {
+            startServiceIfNeeded();
+        } else {
+            ensureBound();
         }
     }
 
-    /** Begin capturing. Requires {@link ShizukuKeyCapture#isReady()}. */
-    public synchronized void start(NvConnection conn) {
+    /** Stop capturing for the stream: release the grab and stop readers, keep binding. */
+    public synchronized void stopReading() {
+        this.conn = null;
+        if (service != null) {
+            try {
+                service.stop();
+            } catch (Exception ignored) {
+            }
+        }
+        started = false;
+        if (active) {
+            active = false;
+            notifyState();
+        }
+    }
+
+    /** Full teardown (app shutdown). */
+    public synchronized void shutdown() {
+        stopReading();
+        if (bound) {
+            try {
+                Shizuku.unbindUserService(userServiceArgs, serviceConnection, true);
+            } catch (Exception ignored) {
+            }
+            bound = false;
+        }
+    }
+
+    private void ensureBound() {
         if (bound) {
             return;
         }
         if (!ShizukuKeyCapture.isReady()) {
-            LimeLog.info("ShizukuInputBackend: not ready, skipping");
+            LimeLog.info("ShizukuInputBackend: not ready, skipping bind");
             return;
         }
-        this.conn = conn;
         try {
             ComponentName cn = new ComponentName(BuildConfig.APPLICATION_ID,
                     ShizukuInputService.class.getName());
@@ -123,32 +163,33 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
                     .tag("shizuku-input-evdev");
             Shizuku.bindUserService(userServiceArgs, serviceConnection);
             bound = true;
-            LimeLog.info("ShizukuInputBackend: bindUserService called");
+            LimeLog.info("ShizukuInputBackend: bindUserService called (persistent)");
         } catch (Exception e) {
             LimeLog.warning("ShizukuInputBackend: bind failed: " + e);
         }
     }
 
-    public synchronized void stop() {
-        if (service != null) {
-            try {
-                service.stop();
-            } catch (Exception ignored) {
-            }
+    private void startServiceIfNeeded() {
+        if (started || service == null) {
+            return;
         }
-        if (bound && userServiceArgs != null) {
-            try {
-                Shizuku.unbindUserService(userServiceArgs, serviceConnection, true);
-            } catch (Exception ignored) {
-            }
-            bound = false;
-        }
-        service = null;
-        conn = null;
-        modifierState = 0;
-        if (active) {
+        try {
+            service.start(this);
+            started = true;
+            active = true;
+            LimeLog.info("ShizukuInputBackend: UserService started (active)");
+            notifyState();
+        } catch (Exception e) {
+            LimeLog.warning("ShizukuInputBackend: start() failed: " + e);
             active = false;
             notifyState();
+        }
+    }
+
+    private void notifyState() {
+        final StateListener l = stateListener;
+        if (l != null) {
+            l.onActiveChanged(active);
         }
     }
 
@@ -165,6 +206,15 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
             }
         }
 
+        // App-internal special combos (Ctrl+Alt+Shift+Q/Z/C) trigger Artemis actions
+        // (quit / toggle grab / toggle cursor) instead of being forwarded to the host.
+        if (down && specialComboListener != null
+                && (modifierState & SPECIAL_COMBO_MODS) == SPECIAL_COMBO_MODS
+                && (linuxKeyCode == KEY_Q || linuxKeyCode == KEY_Z || linuxKeyCode == KEY_C)) {
+            specialComboListener.onSpecialCombo(linuxKeyCode);
+            return;
+        }
+
         NvConnection c = conn;
         if (c == null) {
             return;
@@ -179,11 +229,6 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
                 return;
             }
             vk = (short) k;
-        }
-
-        if (LOG_SENDS || logRawEvents) {
-            LimeLog.info("ShizukuEvdev send vk=" + (vk & 0xFFFF) + " code=" + linuxKeyCode
-                    + " down=" + down + " mod=0x" + Integer.toHexString(modifierState));
         }
 
         c.sendKeyboardInput(vk, down ? KeyboardPacket.KEY_DOWN : KeyboardPacket.KEY_UP,

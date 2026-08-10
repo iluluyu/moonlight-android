@@ -1710,15 +1710,15 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return;
         }
         if (ShizukuKeyCapture.isReady()) {
-            shizukuInputBackend = new ShizukuInputBackend();
-            // Only consume framework keyboard events once the UserService is actually
-            // connected and forwarding — otherwise a dead Shizuku process would silently
-            // swallow every key. The listener fires on the main thread.
+            // Persistent singleton: binds the UserService once; each stream only
+            // toggles reading on/off in the same process (no unbind/rebind churn).
+            shizukuInputBackend = ShizukuInputBackend.getInstance();
             shizukuInputBackend.setStateListener(active -> {
                 shizukuKeyboardActive = active;
                 LimeLog.info("Shizuku keyboard capture active=" + active);
             });
-            shizukuInputBackend.start(conn);
+            shizukuInputBackend.setSpecialComboListener(key -> runOnUiThread(() -> handleShizukuSpecialCombo(key)));
+            shizukuInputBackend.startReading(conn);
             LimeLog.info("Shizuku keyboard capture requested");
         } else {
             LimeLog.info("Shizuku not ready, using framework keyboard path");
@@ -1727,10 +1727,36 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     private void stopShizukuKeyboardCapture() {
         if (shizukuInputBackend != null) {
-            shizukuInputBackend.stop();
-            shizukuInputBackend = null;
+            shizukuInputBackend.stopReading();
         }
         shizukuKeyboardActive = false;
+    }
+
+    /** Handles Ctrl+Alt+Shift+Q/Z/C pressed via the Shizuku keyboard backend. The
+     *  exclusive evdev grab stops these from reaching handleKeyDown (where
+     *  handleSpecialKeys would normally act), so the backend detects the combo and
+     *  forwards it here. Mirrors the actions in handleSpecialKeys. */
+    private void handleShizukuSpecialCombo(int linuxKeyCode) {
+        if (linuxKeyCode == com.limelight.utils.KeyMapper.KEY_Q) { // quit stream
+            LimeLog.info("Shizuku special combo: quit");
+            finish();
+        } else if (linuxKeyCode == com.limelight.utils.KeyMapper.KEY_Z) { // toggle input grab
+            Handler h = getWindow().getDecorView().getHandler();
+            if (h != null) {
+                h.postDelayed(toggleGrab, 250);
+            }
+        } else if (linuxKeyCode == com.limelight.utils.KeyMapper.KEY_C) { // toggle cursor
+            if (!grabbedInput) {
+                inputCaptureProvider.enableCapture();
+                grabbedInput = true;
+            }
+            cursorVisible = !cursorVisible;
+            if (cursorVisible) {
+                inputCaptureProvider.showCursor();
+            } else {
+                inputCaptureProvider.hideCursor();
+            }
+        }
     }
 
     @Override
@@ -1739,6 +1765,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         instance = null;
         stopShizukuKeyboardCapture();
+        com.limelight.binding.input.touch.TrackpadContext.primaryButtonDown = false;
         timerHandler.removeCallbacksAndMessages(null);
 
         if (prefConfig.enableFullExDisplay) handleDisplayRemoved();
@@ -2094,26 +2121,6 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return true;
         }
 
-        // When the Shizuku keyboard backend is active, it captures all keyboard input
-        // directly from evdev (bypassing ColorOS) and sends it to the host itself.
-        // Consume framework keyboard events here to avoid sending each key twice.
-        if (shizukuKeyboardActive && eventSource == InputDevice.SOURCE_KEYBOARD) {
-            return true;
-        }
-
-        // Some OEM keyboards wire the physical Esc key to a scanCode that Android
-        // reports as KEYCODE_BACK (Xiaomi Pad: scanCode 1, OPPO Pad 4 Pro: scanCode 158).
-        // Re-route those to the host as VK_ESCAPE so the Esc key works during streaming.
-        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK &&
-                eventSource == InputDevice.SOURCE_KEYBOARD &&
-                (event.getScanCode() == 1 || event.getScanCode() == 158)) {
-            if (event.getRepeatCount() == 0) {
-                conn.sendKeyboardInput((short) KeyboardTranslator.VK_ESCAPE, KeyboardPacket.KEY_DOWN,
-                        getModifierState(event), (byte) 0);
-            }
-            return true;
-        }
-
         boolean handled = false;
 
         if (ControllerHandler.isGameControllerDevice(event.getDevice())) {
@@ -2124,8 +2131,31 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         // Try the keyboard handler if it wasn't handled as a game controller
         if (!handled) {
-            // Let this method take duplicate key down events
+            // App-internal special combos (Ctrl+Alt+Shift+Z/Q/C) must keep working even
+            // when the Shizuku keyboard backend is active — they trigger Artemis actions
+            // (e.g. Ctrl+Alt+Shift+Q quits the stream); they are not forwarded to the host.
             if (handleSpecialKeys(event.getKeyCode(), true)) {
+                return true;
+            }
+
+            // When the Shizuku keyboard backend is active, it captures all keyboard input
+            // directly from evdev (bypassing ColorOS) and sends it to the host itself.
+            // Consume framework keyboard events here (after app-internal special keys) to
+            // avoid sending each key twice.
+            if (shizukuKeyboardActive && eventSource == InputDevice.SOURCE_KEYBOARD) {
+                return true;
+            }
+
+            // Some OEM keyboards wire the physical Esc key to a scanCode that Android
+            // reports as KEYCODE_BACK (Xiaomi Pad: scanCode 1, OPPO Pad 4 Pro: scanCode 158).
+            // Re-route those to the host as VK_ESCAPE so the Esc key works during streaming.
+            if (event.getKeyCode() == KeyEvent.KEYCODE_BACK &&
+                    eventSource == InputDevice.SOURCE_KEYBOARD &&
+                    (event.getScanCode() == 1 || event.getScanCode() == 158)) {
+                if (event.getRepeatCount() == 0) {
+                    conn.sendKeyboardInput((short) KeyboardTranslator.VK_ESCAPE, KeyboardPacket.KEY_DOWN,
+                            getModifierState(event), (byte) 0);
+                }
                 return true;
             }
 
@@ -3048,9 +3078,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 if ((changedButtons & MotionEvent.BUTTON_PRIMARY) != 0) {
                     if ((buttonState & MotionEvent.BUTTON_PRIMARY) != 0) {
                         conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                        com.limelight.binding.input.touch.TrackpadContext.primaryButtonDown = true;
                     }
                     else {
                         conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+                        com.limelight.binding.input.touch.TrackpadContext.primaryButtonDown = false;
                     }
                 }
 

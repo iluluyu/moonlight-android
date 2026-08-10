@@ -49,9 +49,23 @@ public class ShizukuInputService extends IInputEventService.Stub {
     private final List<ParcelFileDescriptor> grabbedPfds = new ArrayList<>();
     private final List<FileInputStream> plainStreams = new ArrayList<>();
     private volatile boolean running = false;
+    /** Latest callback; readers read this field so a rebind (start() called again while
+     *  running, which Shizuku does) just updates the callback instead of tearing down
+     *  and restarting all reader threads (which previously dropped all key events). */
+    private volatile IInputEventCallback cb;
 
     @Override
-    public void start(IInputEventCallback cb) {
+    public synchronized void start(IInputEventCallback cb) {
+        // Always remember the latest callback. If readers are already running (a rebind
+        // across streams, or Shizuku firing onServiceConnected more than once per bind),
+        // just update the callback and return — restarting readers on every call
+        // previously made them thrash and silently drop all key events.
+        this.cb = cb;
+        // Kill any leftover UserService processes from previous streams. Shizuku does
+        // not reap them (and our destroy() isn't reliably invoked), so they linger and
+        // keep holding the exclusive keyboard grab — without this, a new stream's grab
+        // fails and every key is silently lost (the "breaks on the Nth stream" bug).
+        killSiblingUserServiceProcesses();
         if (running) {
             return;
         }
@@ -84,13 +98,13 @@ public class ShizukuInputService extends IInputEventService.Stub {
                     grabbedPfds.add(pfd);
                     grabbed++;
                     readable++;
-                    startReader(new FileInputStream(pfd.getFileDescriptor()), path, cb);
+                    startReader(new FileInputStream(pfd.getFileDescriptor()), path);
                 } else {
                     // Fallback: read everything non-exclusively.
                     FileInputStream fis = new FileInputStream(dev);
                     plainStreams.add(fis);
                     readable++;
-                    startReader(fis, path, cb);
+                    startReader(fis, path);
                 }
             } catch (Exception e) {
                 // Not readable under current uid — silently skip.
@@ -102,7 +116,7 @@ public class ShizukuInputService extends IInputEventService.Stub {
                 + " grabbed=" + grabbed + " readable=" + readable);
     }
 
-    private void startReader(InputStream in, String path, IInputEventCallback cb) {
+    private void startReader(InputStream in, String path) {
         Thread t = new Thread(() -> {
             ByteBuffer bb = ByteBuffer.allocate(INPUT_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN);
             byte[] buf = bb.array();
@@ -141,7 +155,7 @@ public class ShizukuInputService extends IInputEventService.Stub {
     }
 
     @Override
-    public void stop() {
+    public synchronized void stop() {
         running = false;
         for (ParcelFileDescriptor pfd : grabbedPfds) {
             try {
@@ -157,5 +171,59 @@ public class ShizukuInputService extends IInputEventService.Stub {
             }
         }
         plainStreams.clear();
+    }
+
+    /** Kill leftover UserService processes from previous streams so this one becomes
+     *  the sole holder of the keyboard grab. Runs as the same (shell) uid as those
+     *  siblings, so killProcess is allowed. */
+    private static void killSiblingUserServiceProcesses() {
+        int myPid = android.os.Process.myPid();
+        String[] pids = new File("/proc").list();
+        if (pids == null) {
+            return;
+        }
+        for (String s : pids) {
+            int pid;
+            try {
+                pid = Integer.parseInt(s);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (pid == myPid || pid <= 1) {
+                continue;
+            }
+            String cmdline = readCmdline(pid);
+            if (cmdline.contains(":evdev")) {
+                android.util.Log.i(TAG, "killing leftover UserService pid=" + pid + " (" + cmdline + ")");
+                android.os.Process.killProcess(pid);
+            }
+        }
+    }
+
+    private static String readCmdline(int pid) {
+        try (java.io.FileInputStream fis = new java.io.FileInputStream("/proc/" + pid + "/cmdline")) {
+            byte[] buf = new byte[512];
+            int n = fis.read(buf);
+            if (n <= 0) {
+                return "";
+            }
+            int end = 0;
+            while (end < n && buf[end] != 0) {
+                end++;
+            }
+            return new String(buf, 0, end);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Shizuku calls this on unbindUserService(remove=true). The UserService process
+     *  is otherwise left running and keeps holding the exclusive keyboard grab, which
+     *  made the next stream's fresh UserService fail to grab and silently drop all
+     *  keys. Exiting here releases the grab (kernel closes the fds on process death). */
+    public void destroy() {
+        android.util.Log.i(TAG, "destroy: releasing grab and exiting process");
+        stop();
+        android.os.Process.killProcess(android.os.Process.myPid());
     }
 }
