@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Shizuku provider declares minSdk 23; we guard at runtime with SDK_INT>=M -->
+    <uses-sdk tools:overrideLibrary="rikka.shizuku.provider,rikka.shizuku.api,rikka.shizuku.shared,rikka.shizuku.aidl"/>
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -10,6 +14,8 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="com.android.providers.tv.permission.READ_EPG_DATA"/>
     <uses-permission android:name="com.android.providers.tv.permission.WRITE_EPG_DATA"/>
+    <!-- Shizuku: allows calling Shizuku/Sui APIs (keyboard capture backend) -->
+    <uses-permission android:name="rikka.shizuku.permission.API_V2"/>
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <!-- We don't need a MulticastLock on API level 34+ because we use NsdManager for mDNS -->
     <uses-permission
@@ -64,6 +70,15 @@
             android:enabled="true"
             android:exported="true">
         </provider>
+
+        <!-- Shizuku binder provider (protected from normal apps) -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <receiver android:name=".StartExternalDisplayControlReceiver" />
         <!-- Samsung multi-window support -->
         <uses-library

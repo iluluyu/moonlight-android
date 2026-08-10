@@ -47,3 +47,4 @@ app/.externalNativeBuild/
 
 # agent files
 AGENTS.md
+.pi/

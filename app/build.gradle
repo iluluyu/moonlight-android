@@ -1,9 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    ndkVersion "27.0.12077973"
+    ndkVersion "27.3.13750724"
 
     compileSdk = 36
+    buildToolsVersion "37.0.0"
 
     namespace 'com.limelight'
 
@@ -22,6 +23,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        aidl = true
     }
 
     productFlavors {
@@ -66,6 +68,7 @@ android {
         encoding "UTF-8"
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
+        coreLibraryDesugaringEnabled true
     }
 
     lint {
@@ -182,6 +185,13 @@ dependencies {
     implementation 'com.google.ai.edge.litert:litert:1.4.0'
     implementation 'com.google.ai.edge.litert:litert-gpu:1.4.0'
     implementation 'org.opencv:opencv:4.12.0'
+
+    // Shizuku: run input-reading UserService with shell/root privileges (no root needed)
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+
+    // Required by Shizuku API (v13) when minSdk < 24: desugars Java 8+ library calls
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
 
     // Unit test dependencies
     testImplementation 'junit:junit:4.13.2'
