@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Mirror the override in src/main/AndroidManifest.xml: the Shizuku AARs declare
+         minSdk 23 but Artemis supports 21. The main manifest's override is honored in
+         app merges but not in the unit-test manifest merge (includeAndroidResources). -->
+    <uses-sdk tools:overrideLibrary="rikka.shizuku.provider,rikka.shizuku.api,rikka.shizuku.shared,rikka.shizuku.aidl" />
+</manifest>

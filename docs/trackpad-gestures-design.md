@@ -1,5 +1,15 @@
 # Artemis 触控板完整手势体系设计（调研 + 方案）
 
+> **实现状态（2026-08）**：P0（捏合）+ P1（三指滑）已落地，见 `trackpad-handoff-note.md`。
+> 与本文的差异：
+> - 捏合判别器从"累计点积阈值"升级为 **confirm-and-lock 状态机**（三信号联合 + 滚动锁定），
+>   因为纯点积在慢速滚动 + 手指"走路"时会漂成负值偶发误触；
+> - 三指状态机改为"每次 DOWN 武装、触发时按方向门控"：同向冷却吞掉、反向立即触发、
+>   中途反向重武装、快甩小阈值（60/45px）、一次 stroke 至多一次同向触发；
+> - 三指 stroke 结束时 cancel 两个 TrackpadContext 槽 + 200ms 捏合守卫（尾部隔离），
+>   TrackpadContext.touchDownEvent 增加 cancelled 守卫（修幽灵右键）；
+> - 任务视图导航键有 350ms 展开动画缓冲（postTaskViewKey），超时 8s。
+
 目标设备：OPPO Pad 4 Pro 官方磁吸键盘触控板（event13 pogo_touchpad / event11 Keyboard Touchpad）。
 事件链：`Game.onTouch`(:3486) → `handleMotionEvent`(:2838 起) → 触控板 finger 分支(:3139) → `handleTouchInput(event, trackpadContextMap, false)`(:3185)。指针捕获开启时走相对轴分支(:2857-2916)，含 `CLASSIFICATION_TWO_FINGER_SWIPE` 合成(:2949)。
 
@@ -66,8 +76,11 @@
 
 ## 6. 优先级建议
 
-- **P0（低工作量、高收益、零抢占风险）**：双指捏合缩放(Ctrl+滚轮)；统一并清理 2 指右键/滚动体验。
-- **P1**：三指上/下/左/右滑（Win+Tab / Win+D / Ctrl+Win+←→）——先做 centroid + 阈值版，覆盖远程桌面最常用导航。
-- **P2**：三指轻点 Alt+Tab；四指备选手势。
-- **P3**：边缘手势、可配置 list 映射。
-先落 P0+P1 即可覆盖 80% 远程操控需求，且只动触控板分支与一个新方法。
+- **P0（已完成 ✅）**：双指捏合缩放(Ctrl+滚轮)——confirm-and-lock 判别器；统一并清理 2 指右键/滚动体验。
+- **P1（已完成 ✅）**：三指上/下/左/右滑（Win+Tab / Win+D / Ctrl+Win+←→）——centroid + 阈值版，
+  覆盖远程桌面最常用导航；含任务视图展开动画缓冲、反向即时响应、尾部隔离。
+- **P2（待定）**：三指轻点 Alt+Tab（已实现但参数未实测）；四指备选手势。
+- **P3（待定）**：边缘手势、可配置 list 映射。
+
+实测优先级：捏合慢速滚动误触是否根除、快甩阈值是否过灵敏（TP3_SWIPE_*_FAST）、
+三指快速连滑跟手度（TP3_COOLDOWN_MS=250 同向门控）、任务视图 350ms 缓冲是否足够。

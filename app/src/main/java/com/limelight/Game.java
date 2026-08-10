@@ -177,36 +177,81 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     // 3-finger gesture detection on the framework path (TP-PROBE proved ColorOS does
     // NOT block these — the old #8 conclusion was wrong). Direct MotionEvent tracking.
+    //
+    // State machine: every 3-finger DOWN arms a fresh gesture; a swipe FIRES once per
+    // stroke (never twice — the old code re-armed on a timer mid-stroke, so one long
+    // swipe could double-fire Alt+Tab). Direction-aware gating: a same-direction
+    // repeat within the cooldown is swallowed, but REVERSING direction fires
+    // immediately (no cooldown), and a reversal mid-stroke re-arms the gesture so an
+    // R-then-L stroke cycles the switcher forward and back without lifting.
     private boolean gesture3Active = false;
     private boolean gesture3PrevDown = false;
     private long gesture3StartMs = 0;
     private long gesture3LastFireMs = 0;
+    private int gesture3LastDir = 0;
     private float gesture3StartX = 0, gesture3StartY = 0;
     private float gesture3LastX = 0, gesture3LastY = 0;
+    private float gesture3FireX = 0, gesture3FireY = 0;
     private float gesture3CumDX = 0, gesture3CumDY = 0;
-    private static final int TP3_SWIPE_X = 150;   // px of 3-finger centroid travel
+    /** While set, the 2-finger pinch detector stands down: right after a 3-finger
+     *  stroke ends, two still-down fingers might be moving apart in the tail. */
+    private long gesture3TailGuardUntil = 0;
+    private static final int TP3_SWIPE_X = 150;    // px of 3-finger centroid travel (slow, deliberate)
     private static final int TP3_SWIPE_Y = 120;
-    private static final long TP3_TAP_MAX_DURATION_MS = 300;
-    private static final int TP3_TAP_MAX_MOVE = 60;
-    private static final long TP3_COOLDOWN_MS = 400;
+    private static final int TP3_SWIPE_X_FAST = 60; // quick flicks cross a smaller threshold
+    private static final int TP3_SWIPE_Y_FAST = 45;
+    private static final long TP3_FAST_SWIPE_MAX_MS = 200;
+    private static final long TP3_TAP_MAX_DURATION_MS = 250;
+    private static final int TP3_TAP_MAX_MOVE = 30;
+    private static final long TP3_COOLDOWN_MS = 250;   // same-direction repeat gate
+    private static final int TP3_REVERSE_PX = 50;      // mid-stroke reversal re-arm
+    private static final long TP3_TAIL_GUARD_MS = 200; // 3->2 finger tail guard
 
     // Trackpad pinch-to-zoom state (2 fingers moving apart/together → Ctrl+wheel).
+    //
+    // Discriminator (the framework's getClassification() always returns NONE on this
+    // OPPO trackpad, so we classify ourselves): a scroll moves both fingers together
+    // (centroid travels, separation ~constant, dot product of the two motion vectors
+    // positive), a pinch changes the separation (centroid ~still, dot negative). The
+    // old pure cumulative-dot test still misfired: a slow scroll with "walking"
+    // fingers drifts negative and crosses the pinch threshold. New design:
+    //   • CONFIRM pinch only when separation change dominates centroid travel AND
+    //     the net dot is negative AND both fingers actually moved;
+    //   • LOCK the gesture as scroll once the centroid travels far with separation
+    //     stable — after that it can never become a pinch (macOS/Windows behave the
+    //     same: a gesture's identity is fixed once established).
+    private boolean pinchTracking = false;
     private float lastPinchDistance = 0f;
     private float pinchLastX0 = 0f, pinchLastY0 = 0f, pinchLastX1 = 0f, pinchLastY1 = 0f;
-    private float pinchCumDot = 0f;
+    private float pinchCumSep = 0f;          // signed cumulative separation change
+    private float pinchCumCentroid = 0f;     // unsigned cumulative centroid travel
+    private float pinchCumDot = 0f;          // cumulative dot of the two motion vectors
+    private float pinchFinger0Travel = 0f, pinchFinger1Travel = 0f;
+    private long pinchLastMoveMs = 0;
+    private boolean pinchScrollLocked = false;
     private boolean pinchZoomActive = false;
-    private float pendingPinchScroll = 0f;
-    // Pinch vs scroll discriminator: dot product of the two fingers' motion. Same
-    // direction (positive) = scroll; opposite (negative) = pinch. Robust on this OPPO
-    // trackpad where the framework's getClassification() always returns NONE.
-    private static final float PINCH_SCROLL_DOT_THRESHOLD = 800f;
-    private static final float PINCH_NOTCH_UNITS = 30f;        // scroll granularity (quarter of a wheel notch)
+    private float pinchZoomStartDist = 0f;   // separation when Ctrl went down
+    private float pinchZoomSent = 0f;        // wheel units already emitted
+    private static final float PINCH_SEP_CONFIRM_PX = 45f;       // separation change that confirms a pinch
+    private static final float PINCH_SEP_CENTROID_RATIO = 1.25f; // ...must dominate centroid travel by this much
+    private static final float PINCH_FINGER_MIN_TRAVEL = 15f;    // ...and both fingers must be engaged
+    private static final float PINCH_CENTROID_LOCK_PX = 70f;     // centroid travel that locks the gesture as scroll
+    private static final float PINCH_LOCK_SEP_RATIO = 0.35f;     // ...with separation change below this fraction of it
+    private static final long PINCH_PHASE_RESET_MS = 150;        // pause longer than this halves stale accumulators
+    private static final float PINCH_ZOOM_GAIN = 1.5f;           // finger separation px → wheel units
+    private static final float PINCH_NOTCH_UNITS = 30f;          // scroll granularity (quarter of a wheel notch)
 
     // Trackpad gesture "native feel": after 3-finger up opens Windows Task View
     // (Win+Tab), left/right/up/down swipes navigate it with arrow keys; tap selects.
     private boolean taskViewMode = false;
     private long taskViewModeUntil = 0;
-    private static final long TASK_VIEW_TIMEOUT_MS = 4000;
+    private static final long TASK_VIEW_TIMEOUT_MS = 8000;
+    /** Windows Task View animates open for ~300-400ms; arrow/Enter keys sent during
+     *  that window get dropped, so the first few navigation actions are buffered
+     *  until it has fully opened. */
+    private static final long TASK_VIEW_NAV_ARM_MS = 350;
+    private long taskViewNavArmedUntil = 0;
+    private Runnable pendingTaskViewNavRunnable = null;
 
     // Native-feel Alt+Tab switcher: Alt is held while the user cycles apps (each
     // swipe = one Tab). Release is gesture-driven, not a long timer: Alt closes a
@@ -1808,6 +1853,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // keeps it alive so the user can keep swiping to pick a window.
         if (taskViewMode && System.currentTimeMillis() > taskViewModeUntil) {
             taskViewMode = false;
+            cancelPendingTaskViewNav();
         }
         if (taskViewMode) {
             taskViewModeUntil = System.currentTimeMillis() + TASK_VIEW_TIMEOUT_MS;
@@ -1816,7 +1862,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         switch (gestureType) {
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT:
                 if (taskViewMode) {
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_LEFT });
+                    postTaskViewKey((short) KeyboardTranslator.VK_LEFT);
                 } else {
                     // Previous app (Alt+Shift+Tab) with the switcher held open.
                     ensureAltTabHeld();
@@ -1825,7 +1871,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT:
                 if (taskViewMode) {
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_RIGHT });
+                    postTaskViewKey((short) KeyboardTranslator.VK_RIGHT);
                 } else {
                     ensureAltTabHeld();
                     sendTabWhileSwitching(false); // next app (Alt+Tab)
@@ -1833,27 +1879,35 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP:
                 if (taskViewMode) {
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_UP });
+                    postTaskViewKey((short) KeyboardTranslator.VK_UP);
                 } else {
                     // Open Task View and enter navigation mode (all four directions pick).
                     releaseAltTab();
+                    cancelPendingTaskViewNav();
                     sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_TAB });
                     taskViewMode = true;
                     taskViewModeUntil = System.currentTimeMillis() + TASK_VIEW_TIMEOUT_MS;
+                    // Windows animates Task View open; buffer the first nav keys so
+                    // they aren't dropped while it's still settling.
+                    taskViewNavArmedUntil = System.currentTimeMillis() + TASK_VIEW_NAV_ARM_MS;
                 }
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN:
                 if (taskViewMode) {
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_DOWN });
+                    postTaskViewKey((short) KeyboardTranslator.VK_DOWN);
                 } else {
                     releaseAltTab();
+                    cancelPendingTaskViewNav();
                     sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_D });
                     taskViewMode = false;
                 }
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP:
                 if (taskViewMode) {
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_RETURN }); // select
+                    // Select the highlighted window. Drop any buffered nav first so
+                    // it can't fire after the selection (Enter is re-posted last).
+                    cancelPendingTaskViewNav();
+                    postTaskViewKey((short) KeyboardTranslator.VK_RETURN);
                     taskViewMode = false;
                 } else if (altTabActive) {
                     releaseAltTab(); // select the highlighted app
@@ -1881,10 +1935,34 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
     }
 
+    /** Sends a single key tap into Task View. While Task View is still animating
+     *  open (arm window), the key is buffered — Windows drops keys sent during the
+     *  animation. Only the most recent nav key is kept (no backlog), so rapid
+     *  swipes behave like key-repeat instead of queuing up stale arrows. */
+    private void postTaskViewKey(final short vk) {
+        timerHandler.removeCallbacks(pendingTaskViewNavRunnable);
+        long wait = taskViewNavArmedUntil - System.currentTimeMillis();
+        if (wait < 0) {
+            wait = 0;
+        }
+        pendingTaskViewNavRunnable = () -> {
+            conn.sendKeyboardInput(vk, KeyboardPacket.KEY_DOWN, (byte) 0, (byte) 0);
+            conn.sendKeyboardInput(vk, KeyboardPacket.KEY_UP, (byte) 0, (byte) 0);
+        };
+        timerHandler.postDelayed(pendingTaskViewNavRunnable, wait);
+    }
+
+    private void cancelPendingTaskViewNav() {
+        timerHandler.removeCallbacks(pendingTaskViewNavRunnable);
+        pendingTaskViewNavRunnable = null;
+    }
+
     /** Opens the Alt+Tab switcher (Alt down) and keeps it open while the user cycles;
      *  each swipe re-arms a release timer so the switcher closes (with its animation)
      *  only after the user stops swiping. */
     private void ensureAltTabHeld() {
+        // A pending Task View select/nav key must not fire once we switched modes.
+        cancelPendingTaskViewNav();
         if (!altTabActive) {
             conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_DOWN,
                     KeyboardPacket.MODIFIER_ALT, (byte) 0);
@@ -3428,51 +3506,125 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     /** Detects 3-finger swipes/taps directly from framework MotionEvents (the events
      *  DO reach us — re-verified). Returns true to consume 3-finger events entirely
-     *  (they are gesture-only; the 2-slot TrackpadContext can't use them anyway). */
+     *  (they are gesture-only; the 2-slot TrackpadContext can't use them anyway).
+     *
+     *  <p>One stroke = at most one fire per direction: a swipe is consumed once it
+     *  fires (or is swallowed as a same-direction repeat inside the cooldown) until
+     *  the fingers lift — a long swipe can never double-fire. Reversing direction
+     *  mid-stroke re-arms the gesture, so an R-then-L stroke cycles the Alt+Tab
+     *  switcher forward and back without lifting, and reversed swipes bypass the
+     *  cooldown. Fast flicks cross a smaller threshold than slow deliberate swipes.
+     *
+     *  <p>All timestamps use {@link MotionEvent#getEventTime()} (uptime) so they
+     *  stay comparable across this class and {@link #handleTrackpadPinch}.
+     */
     private boolean handleTrackpadGestures(MotionEvent event) {
         int pc = event.getPointerCount();
-        long now = System.currentTimeMillis();
+        int action = event.getActionMasked();
+        long now = event.getEventTime();
+
+        // The system stole the gesture (ACTION_CANCEL): tear down exactly like a
+        // lift, but never count it as a tap. Swallow only multi-finger cancels so
+        // single-finger cancels still reach the touch contexts.
+        if (action == MotionEvent.ACTION_CANCEL) {
+            if (gesture3PrevDown) {
+                gesture3PrevDown = false;
+                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
+                resetTrackpadContexts();
+                gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+            }
+            gesture3Active = false;
+            return pc >= 3;
+        }
 
         if (pc >= 3) {
-            if (!gesture3PrevDown) {
-                gesture3PrevDown = true;
-                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START);
-            }
-
             // Update centroid (use the first 3 pointers; extra fingers are ignored).
             float cx = (event.getX(0) + event.getX(1) + event.getX(2)) / 3f;
             float cy = (event.getY(0) + event.getY(1) + event.getY(2)) / 3f;
 
-            if (!gesture3Active) {
-                if (now - gesture3LastFireMs > TP3_COOLDOWN_MS) {
-                    gesture3Active = true;
-                    gesture3StartMs = now;
-                    gesture3StartX = gesture3LastX = cx;
-                    gesture3StartY = gesture3LastY = cy;
-                    gesture3CumDX = gesture3CumDY = 0;
-                }
-                return true; // consume 3-finger events
+            if (!gesture3PrevDown) {
+                gesture3PrevDown = true;
+                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START);
+                // Arm a fresh gesture immediately; direction-aware gating happens at
+                // fire time so a quick opposite-direction swipe is never dropped.
+                gesture3Active = true;
+                gesture3StartMs = now;
+                gesture3StartX = gesture3LastX = cx;
+                gesture3StartY = gesture3LastY = cy;
+                gesture3CumDX = gesture3CumDY = 0;
+                // The stroke is now 3-finger; whatever 2-finger identity the pinch
+                // detector was building is void.
+                resetPinchState();
             }
 
-            if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
-                gesture3CumDX += cx - gesture3LastX;
-                gesture3CumDY += cy - gesture3LastY;
-                gesture3LastX = cx;
-                gesture3LastY = cy;
-                if (Math.abs(gesture3CumDX) > TP3_SWIPE_X
-                        && Math.abs(gesture3CumDX) > Math.abs(gesture3CumDY) * 1.5f) {
-                    handleTrackpadGesture(gesture3CumDX > 0
-                            ? com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT
-                            : com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT);
-                    gesture3LastFireMs = now;
-                    gesture3Active = false;
-                } else if (Math.abs(gesture3CumDY) > TP3_SWIPE_Y
-                        && Math.abs(gesture3CumDY) > Math.abs(gesture3CumDX) * 1.5f) {
-                    handleTrackpadGesture(gesture3CumDY > 0
-                            ? com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN
-                            : com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP);
-                    gesture3LastFireMs = now;
-                    gesture3Active = false;
+            if (action == MotionEvent.ACTION_MOVE) {
+                if (gesture3Active) {
+                    gesture3CumDX += cx - gesture3LastX;
+                    gesture3CumDY += cy - gesture3LastY;
+                    gesture3LastX = cx;
+                    gesture3LastY = cy;
+
+                    // Fast flicks cross a smaller threshold so a quick swipe fires
+                    // while it's still fast; slow deliberate swipes need full travel.
+                    long elapsed = now - gesture3StartMs;
+                    boolean fast = elapsed < TP3_FAST_SWIPE_MAX_MS;
+                    float thrX = fast ? TP3_SWIPE_X_FAST : TP3_SWIPE_X;
+                    float thrY = fast ? TP3_SWIPE_Y_FAST : TP3_SWIPE_Y;
+                    float dominantRatio = fast ? 1.3f : 1.5f;
+
+                    int dir = 0;
+                    if (Math.abs(gesture3CumDX) > thrX
+                            && Math.abs(gesture3CumDX) > Math.abs(gesture3CumDY) * dominantRatio) {
+                        dir = gesture3CumDX > 0
+                                ? com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT
+                                : com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT;
+                    } else if (Math.abs(gesture3CumDY) > thrY
+                            && Math.abs(gesture3CumDY) > Math.abs(gesture3CumDX) * dominantRatio) {
+                        dir = gesture3CumDY > 0
+                                ? com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN
+                                : com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP;
+                    }
+
+                    if (dir != 0) {
+                        // Same-direction repeat inside the cooldown is swallowed (the
+                        // previous fire is still settling); reversing direction fires
+                        // immediately — "change your mind" while cycling must not wait.
+                        if (dir != gesture3LastDir || now - gesture3LastFireMs > TP3_COOLDOWN_MS) {
+                            gesture3LastDir = dir;
+                            gesture3LastFireMs = now;
+                            gesture3FireX = cx;
+                            gesture3FireY = cy;
+                            handleTrackpadGesture(dir);
+                        }
+                        // Either way this stroke is consumed until the fingers lift
+                        // (or reverse — see below), so a long swipe can't re-fire.
+                        gesture3Active = false;
+                    }
+                } else if (gesture3LastDir != 0) {
+                    // A swipe already fired in this stroke. Watch for a direction
+                    // reversal to re-arm: R-then-L cycles the switcher back without
+                    // lifting, and the reversed swipe bypasses the cooldown at fire.
+                    boolean reversed = false;
+                    if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT
+                            && cx - gesture3FireX > TP3_REVERSE_PX) {
+                        reversed = true;
+                    } else if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT
+                            && gesture3FireX - cx > TP3_REVERSE_PX) {
+                        reversed = true;
+                    } else if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP
+                            && cy - gesture3FireY > TP3_REVERSE_PX) {
+                        reversed = true;
+                    } else if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN
+                            && gesture3FireY - cy > TP3_REVERSE_PX) {
+                        reversed = true;
+                    }
+                    if (reversed) {
+                        gesture3Active = true;
+                        gesture3StartMs = now;
+                        gesture3StartX = gesture3LastX = cx;
+                        gesture3StartY = gesture3LastY = cy;
+                        gesture3CumDX = gesture3CumDY = 0;
+                    }
                 }
             }
             return true; // consume 3-finger events
@@ -3491,19 +3643,41 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 }
                 gesture3Active = false;
             }
+            resetTrackpadContexts();
+            gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
         }
         return false;
     }
 
+    /** The TrackpadContext slots froze while the 3-finger stroke consumed everything;
+     *  a partial lift (3->2 fingers) would otherwise read as a stale 2-finger scroll
+     *  or pinch. Cancelling them makes all subsequent events no-ops until the next
+     *  gesture's first finger DOWN re-initialises them. */
+    private void resetTrackpadContexts() {
+        for (TouchContext tc : trackpadContextMap) {
+            tc.cancelTouch();
+            tc.setPointerCount(0);
+        }
+    }
+
     /** Detect a two-finger pinch on the trackpad and translate it to Ctrl+wheel zoom.
      *  Returns true if the event was consumed as a pinch (suppresses 2-finger scroll).
-     *  Discriminator: the dot product of the two fingers' motion vectors. A scroll
-     *  moves both fingers in the same direction (positive dot), a pinch in opposite
-     *  directions (negative dot). This is far more robust than separation-change
-     *  heuristics on this OPPO trackpad (where framework classification is NONE). */
+     *
+     *  <p>Classification (the framework's getClassification() is always NONE on this
+     *  OPPO trackpad, so we classify ourselves): a scroll moves both fingers together
+     *  — the centroid travels while the separation stays ~constant and the motion
+     *  vectors' dot product is positive; a pinch changes the separation — the
+     *  centroid barely moves and the dot is negative. The gesture's identity is
+     *  fixed once established (confirm-and-lock): once the centroid has travelled
+     *  far with stable separation, the gesture is locked as scroll and can never
+     *  become a pinch. That kills the old false triggers (a slow scroll with
+     *  "walking" fingers drifting negative, or a "gather" at the start of a
+     *  scroll).
+     */
     private boolean handleTrackpadPinch(MotionEvent event) {
         int action = event.getActionMasked();
         int pc = event.getPointerCount();
+        long now = event.getEventTime();
 
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP
                 || action == MotionEvent.ACTION_CANCEL) {
@@ -3518,67 +3692,112 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return false;
         }
 
+        // Tail of a 3-finger stroke: two fingers still down must not start a pinch.
+        if (now < gesture3TailGuardUntil) {
+            return false;
+        }
+
         float x0 = event.getX(0), y0 = event.getY(0);
         float x1 = event.getX(1), y1 = event.getY(1);
         float dist = (float) Math.sqrt((x0 - x1) * (x0 - x1) + (y0 - y1) * (y0 - y1));
 
-        if (lastPinchDistance == 0f) {
+        if (!pinchTracking) {
             // First move frame: seed finger positions and separation baseline.
+            pinchTracking = true;
             pinchLastX0 = x0; pinchLastY0 = y0;
             pinchLastX1 = x1; pinchLastY1 = y1;
             lastPinchDistance = dist;
-            pinchCumDot = 0f;
+            pinchCumSep = pinchCumCentroid = pinchCumDot = 0f;
+            pinchFinger0Travel = pinchFinger1Travel = 0f;
+            pinchLastMoveMs = now;
             return false;
         }
 
-        float dDist = dist - lastPinchDistance;
-        lastPinchDistance = dist;
+        // Stale-accumulator decay: if the fingers rested for a while, the old bias
+        // (e.g. a small gather before a scroll) should not decide this new phase.
+        if (now - pinchLastMoveMs > PINCH_PHASE_RESET_MS) {
+            pinchCumSep *= 0.5f;
+            pinchCumCentroid *= 0.5f;
+            pinchCumDot *= 0.5f;
+            pinchFinger0Travel *= 0.5f;
+            pinchFinger1Travel *= 0.5f;
+        }
+        pinchLastMoveMs = now;
 
         float dx0 = x0 - pinchLastX0, dy0 = y0 - pinchLastY0;
         float dx1 = x1 - pinchLastX1, dy1 = y1 - pinchLastY1;
         pinchLastX0 = x0; pinchLastY0 = y0;
         pinchLastX1 = x1; pinchLastY1 = y1;
-        // Same direction → positive dot (scroll); opposite → negative dot (pinch).
+
+        float dDist = dist - lastPinchDistance;
+        lastPinchDistance = dist;
+
+        pinchCumSep += dDist;
+        float centroidDx = (dx0 + dx1) / 2f;
+        float centroidDy = (dy0 + dy1) / 2f;
+        pinchCumCentroid += (float) Math.sqrt(centroidDx * centroidDx + centroidDy * centroidDy);
         pinchCumDot += dx0 * dx1 + dy0 * dy1;
+        pinchFinger0Travel += (float) Math.sqrt(dx0 * dx0 + dy0 * dy0);
+        pinchFinger1Travel += (float) Math.sqrt(dx1 * dx1 + dy1 * dy1);
 
-        if (!pinchZoomActive) {
-            if (pinchCumDot > PINCH_SCROLL_DOT_THRESHOLD) {
-                // Fingers clearly moving together — a scroll, not a pinch.
-                resetPinchState();
-                return false;
+        if (pinchZoomActive) {
+            // Position-based zoom: track the separation relative to when Ctrl went
+            // down, so resting fingers don't drift and reversing zooms back out.
+            float totalDelta = (dist - pinchZoomStartDist) * PINCH_ZOOM_GAIN;
+            float pending = totalDelta - pinchZoomSent;
+            int notches = (int) (pending / PINCH_NOTCH_UNITS);
+            if (notches > 40) {
+                notches = 40;
+            } else if (notches < -40) {
+                notches = -40;
             }
-            if (pinchCumDot < -PINCH_SCROLL_DOT_THRESHOLD) {
-                // Fingers clearly opposing — a pinch.
-                conn.sendKeyboardInput((short) KeyboardTranslator.VK_LCONTROL, KeyboardPacket.KEY_DOWN,
-                        KeyboardPacket.MODIFIER_CTRL, (byte) 0);
-                pinchZoomActive = true;
-                LimeLog.info("Pinch zoom started");
-            } else {
-                return false; // undetermined yet — let the normal path handle this frame
+            if (notches != 0) {
+                conn.sendMouseHighResScroll((short) (notches * PINCH_NOTCH_UNITS));
+                pinchZoomSent += notches * PINCH_NOTCH_UNITS;
             }
-        }
-
-        // Dead zone: discard sub-3px per-frame jitter so the zoom doesn't pulse.
-        if (Math.abs(dDist) < 3f) {
             return true;
         }
 
-        // Send accumulated separation change in discrete notches so the host doesn't get
-        // a flood of tiny scroll packets every frame (which caused stutter).
-        pendingPinchScroll += dDist;
-        int notches = (int) (pendingPinchScroll / PINCH_NOTCH_UNITS);
-        if (notches != 0) {
-            conn.sendMouseHighResScroll((short) (notches * PINCH_NOTCH_UNITS));
-            pendingPinchScroll -= notches * PINCH_NOTCH_UNITS;
+        if (pinchScrollLocked) {
+            return false; // this gesture is a scroll; let TrackpadContext handle it
         }
-        return true;
+
+        // Scroll lock: the centroid travelled far while the separation stayed put —
+        // unmistakably a scroll, and it must stay one for the rest of the gesture.
+        if (pinchCumCentroid > PINCH_CENTROID_LOCK_PX
+                && Math.abs(pinchCumSep) < pinchCumCentroid * PINCH_LOCK_SEP_RATIO) {
+            pinchScrollLocked = true;
+            return false;
+        }
+
+        // Pinch confirmation: separation change dominates centroid travel, the net
+        // dot is negative (fingers moving in opposing directions) and both fingers
+        // are actually engaged — a resting finger kills it, because that is a scroll
+        // catching up (one finger moving, the other still), not a pinch.
+        if (Math.abs(pinchCumSep) > PINCH_SEP_CONFIRM_PX
+                && Math.abs(pinchCumSep) > pinchCumCentroid * PINCH_SEP_CENTROID_RATIO
+                && pinchCumDot < 0f
+                && pinchFinger0Travel > PINCH_FINGER_MIN_TRAVEL
+                && pinchFinger1Travel > PINCH_FINGER_MIN_TRAVEL) {
+            conn.sendKeyboardInput((short) KeyboardTranslator.VK_LCONTROL, KeyboardPacket.KEY_DOWN,
+                    KeyboardPacket.MODIFIER_CTRL, (byte) 0);
+            pinchZoomActive = true;
+            pinchZoomStartDist = dist;
+            pinchZoomSent = 0f;
+            LimeLog.info("Pinch zoom started");
+            return true;
+        }
+
+        return false; // undetermined — let the normal 2-finger path handle this frame
     }
 
     private void resetPinchState() {
         endPinchZoom();
+        pinchTracking = false;
+        pinchScrollLocked = false;
         lastPinchDistance = 0f;
-        pendingPinchScroll = 0f;
-        pinchCumDot = 0f;
+        pinchCumSep = pinchCumCentroid = pinchCumDot = 0f;
+        pinchFinger0Travel = pinchFinger1Travel = 0f;
         pinchLastX0 = pinchLastY0 = pinchLastX1 = pinchLastY1 = 0f;
     }
 

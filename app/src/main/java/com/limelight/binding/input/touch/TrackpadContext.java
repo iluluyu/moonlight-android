@@ -210,6 +210,13 @@ public class TrackpadContext implements TouchContext {
 
     @Override
     public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger) {
+        if (cancelled && !isNewFinger) {
+            // Context was cancelled (e.g. a 3-finger gesture ended while this finger
+            // was down). A "remaining finger becomes primary" re-down must not fire
+            // a phantom right-click — only a fresh gesture (isNewFinger) revives us.
+            return true;
+        }
+
         if (isFlicking) {
             isFlicking = false;
             handler.removeCallbacksAndMessages(null);
