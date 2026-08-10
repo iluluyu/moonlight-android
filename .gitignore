@@ -48,3 +48,6 @@ app/.externalNativeBuild/
 # agent files
 AGENTS.md
 .pi/
+
+# fork release signing (do not commit)
+app/keystore.properties
