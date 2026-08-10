@@ -30,6 +30,14 @@ public class TrackpadContext implements TouchContext {
     private double velocityY = 0.0;
     private long lastMoveTime;
     private boolean isScrollTransitioning = false;
+    /** Tracks whether we have an outstanding left-button DOWN with no matching UP. */
+    private boolean leftButtonDown = false;
+    /** EventTime when a second tap landed (for double-tap-and-drag hold gating). */
+    private long dragArmTime = 0;
+    /** Global: is the primary (left) mouse button currently held down? Shared across
+     *  both trackpad contexts AND the hardware press-to-click path in Game, so that
+     *  movement while the button is held drags instead of scrolling. */
+    public static volatile boolean primaryButtonDown = false;
 
     private final NvConnection conn;
     private final int actionIndex;
@@ -51,6 +59,10 @@ public class TrackpadContext implements TouchContext {
     private static final int MOMENTUM_FRAME_INTERVAL_MS = 10;
     private static final int FLICK_VELOCITY_DECAY_TIMEOUT_MS = 50;
     private static final int SCROLL_TRANSITION_TIMEOUT_MS = 200;
+    /** A second tap must linger this long (without significant movement) before a
+     *  double-tap-and-drag activates, so a quick "tap then move the cursor" is not
+     *  mistaken for a drag (which previously left the left button stuck down). */
+    private static final int DRAG_HOLD_DELAY_MS = 120;
 
     public TrackpadContext(NvConnection conn, int actionIndex) {
         this.conn = conn;
@@ -97,7 +109,7 @@ public class TrackpadContext implements TouchContext {
             if (Math.sqrt(velocityX * velocityX + velocityY * velocityY) * MOMENTUM_FRAME_INTERVAL_MS < 0.5) {
                 isFlicking = false;
                 if (confirmedDrag) {
-                    conn.sendMouseButtonUp(getMouseButtonIndex());
+                    mouseUp(getMouseButtonIndex());
                     confirmedDrag = false;
                 }
             }
@@ -178,6 +190,22 @@ public class TrackpadContext implements TouchContext {
         }
     }
 
+    /** Wraps mouse button sends to keep {@link #primaryButtonDown} in sync for the
+     *  primary (left) button, so the trackpad can tell drags from scrolls. */
+    private void mouseDown(byte button) {
+        conn.sendMouseButtonDown(button);
+        if (button == MouseButtonPacket.BUTTON_LEFT) {
+            primaryButtonDown = true;
+        }
+    }
+
+    private void mouseUp(byte button) {
+        conn.sendMouseButtonUp(button);
+        if (button == MouseButtonPacket.BUTTON_LEFT) {
+            primaryButtonDown = false;
+        }
+    }
+
     @Override
     public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger) {
         if (isFlicking) {
@@ -204,22 +232,26 @@ public class TrackpadContext implements TouchContext {
             velocityY = 0;
             lastMoveTime = eventTime;
             if (isClickPending) {
+                // A second tap landed within the click window — could be a double-click
+                // or a double-tap-and-drag. Do NOT arm a drag immediately: only promote
+                // to drag in touchMoveEvent after the finger lingers DRAG_HOLD_DELAY_MS,
+                // so "tap then move cursor" doesn't drag (and stick the left button).
                 isClickPending = false;
                 isDblClickPending = true;
-                confirmedDrag = true;
+                dragArmTime = eventTime;
             }
         } else {
             if (pointerCount == 2 && !confirmedMove) {
-                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_MIDDLE);
-                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_MIDDLE);
+                mouseDown(MouseButtonPacket.BUTTON_MIDDLE);
+                mouseUp(MouseButtonPacket.BUTTON_MIDDLE);
                 isClickPending = false;
                 isDblClickPending = false;
                 confirmedDrag = false;
                 clickedMiddle = true;
             // Second finger released, should trigger right click immediately
             } else if (pointerCount == 1 && !confirmedMove && !clickedMiddle) {
-                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
-                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
+                mouseDown(MouseButtonPacket.BUTTON_RIGHT);
+                mouseUp(MouseButtonPacket.BUTTON_RIGHT);
                 isClickPending = false;
                 isDblClickPending = false;
                 confirmedDrag = false;
@@ -253,11 +285,12 @@ public class TrackpadContext implements TouchContext {
 
         if (isDblClickPending) {
             handler.removeCallbacksAndMessages(null);
-            conn.sendMouseButtonUp(buttonIndex);
-            conn.sendMouseButtonDown(buttonIndex);
-            conn.sendMouseButtonUp(buttonIndex);
+            mouseUp(buttonIndex);
+            mouseDown(buttonIndex);
+            mouseUp(buttonIndex);
             isClickPending = false;
             confirmedDrag = false;
+            leftButtonDown = false;
         }
         else if (confirmedDrag) {
             handler.removeCallbacksAndMessages(null);
@@ -267,18 +300,25 @@ public class TrackpadContext implements TouchContext {
                 isFlicking = true;
                 handler.post(momentumRunnable);
             } else {
-                conn.sendMouseButtonUp(buttonIndex);
+                mouseUp(buttonIndex);
+                if (buttonIndex == MouseButtonPacket.BUTTON_LEFT) {
+                    leftButtonDown = false;
+                }
                 confirmedDrag = false;
             }
         }
         else if (isTap(eventTime)) {
-            conn.sendMouseButtonDown(buttonIndex);
+            mouseDown(buttonIndex);
+            leftButtonDown = (buttonIndex == MouseButtonPacket.BUTTON_LEFT);
             isClickPending = true;
 
             handler.removeCallbacksAndMessages(null);
             handler.postDelayed(() -> {
                 if (isClickPending) {
-                    conn.sendMouseButtonUp(buttonIndex);
+                    mouseUp(buttonIndex);
+                    if (buttonIndex == MouseButtonPacket.BUTTON_LEFT) {
+                        leftButtonDown = false;
+                    }
                     isClickPending = false;
                 }
                 isDblClickPending = false;
@@ -313,8 +353,22 @@ public class TrackpadContext implements TouchContext {
             checkForConfirmedMove(eventX, eventY);
 
             if (isDblClickPending) {
-                isDblClickPending = false;
-                confirmedDrag = true;
+                if (eventTime - dragArmTime >= DRAG_HOLD_DELAY_MS) {
+                    // Held long enough — deliberate double-tap-and-drag. Left is already
+                    // down from the pending tap, so just enter drag mode.
+                    isDblClickPending = false;
+                    confirmedDrag = true;
+                } else {
+                    // Moved too soon after the second tap — treat as a plain cursor move.
+                    // Release the pending left button so this movement does not drag.
+                    handler.removeCallbacksAndMessages(null);
+                    if (leftButtonDown) {
+                        mouseUp(MouseButtonPacket.BUTTON_LEFT);
+                        leftButtonDown = false;
+                    }
+                    isDblClickPending = false;
+                    isClickPending = false;
+                }
             }
 
             int rawDeltaX = eventX - lastTouchX;
@@ -372,7 +426,15 @@ public class TrackpadContext implements TouchContext {
             short sendDeltaX = (short)pendingDeltaX;
             short sendDeltaY = (short)pendingDeltaY;
 
-            if (pointerCount == 1) {
+            if (confirmedDrag || (actionIndex == 1 && pointerCount == 2 && primaryButtonDown)) {
+                // Dragging: either this finger is in a software drag, or the primary
+                // button is held (e.g. hardware press-to-click on the OPPO trackpad)
+                // while another finger moves. Move the cursor instead of scrolling, so
+                // "hold button with one finger, drag with another" works.
+                if (sendDeltaX != 0 || sendDeltaY != 0) {
+                    conn.sendMouseMove(sendDeltaX, sendDeltaY);
+                }
+            } else if (pointerCount == 1) {
                 // Don't move the mouse immediately after a scroll
                 if (!isScrollTransitioning) {
                     if (sendDeltaX != 0 || sendDeltaY != 0) {
@@ -380,24 +442,18 @@ public class TrackpadContext implements TouchContext {
                     }
                 }
             } else {
-                if (actionIndex == 1) {
-                    if (confirmedDrag) {
-                        if (sendDeltaX != 0 || sendDeltaY != 0) {
-                            conn.sendMouseMove(sendDeltaX, sendDeltaY);
-                        }
-                    } else if (pointerCount == 2) {
-                        checkForConfirmedScroll();
-                        if (confirmedScroll) {
-                            if (absDeltaX > absDeltaY) {
-                                conn.sendMouseHighResHScroll((short)(-sendDeltaX * SCROLL_SPEED_FACTOR_X));
-                                if (absDeltaY * 1.05 > absDeltaX) {
-                                    conn.sendMouseHighResScroll((short)(sendDeltaY * SCROLL_SPEED_FACTOR_Y));
-                                }
-                            } else {
+                if (actionIndex == 1 && pointerCount == 2) {
+                    checkForConfirmedScroll();
+                    if (confirmedScroll) {
+                        if (absDeltaX > absDeltaY) {
+                            conn.sendMouseHighResHScroll((short)(-sendDeltaX * SCROLL_SPEED_FACTOR_X));
+                            if (absDeltaY * 1.05 > absDeltaX) {
                                 conn.sendMouseHighResScroll((short)(sendDeltaY * SCROLL_SPEED_FACTOR_Y));
-                                if (absDeltaX * 1.05 >= absDeltaY) {
-                                    conn.sendMouseHighResHScroll((short)(-sendDeltaX * SCROLL_SPEED_FACTOR_X));
-                                }
+                            }
+                        } else {
+                            conn.sendMouseHighResScroll((short)(sendDeltaY * SCROLL_SPEED_FACTOR_Y));
+                            if (absDeltaX * 1.05 >= absDeltaY) {
+                                conn.sendMouseHighResHScroll((short)(-sendDeltaX * SCROLL_SPEED_FACTOR_X));
                             }
                         }
                     }
@@ -415,13 +471,22 @@ public class TrackpadContext implements TouchContext {
     public void cancelTouch() {
         cancelled = true;
 
+        handler.removeCallbacksAndMessages(null);
+
         if (isFlicking) {
             isFlicking = false;
-            handler.removeCallbacksAndMessages(null);
         }
 
         if (confirmedDrag) {
-            conn.sendMouseButtonUp(getMouseButtonIndex());
+            mouseUp(getMouseButtonIndex());
+        }
+
+        // Never leave a pending tap's left button stuck down across a cancel.
+        if (leftButtonDown || isClickPending || isDblClickPending) {
+            mouseUp(MouseButtonPacket.BUTTON_LEFT);
+            leftButtonDown = false;
+            isClickPending = false;
+            isDblClickPending = false;
         }
     }
 
@@ -445,10 +510,22 @@ public class TrackpadContext implements TouchContext {
         }
 
         if (pointerCount < this.pointerCount && confirmedDrag && !isFlicking) {
-            conn.sendMouseButtonUp(getMouseButtonIndex());
+            mouseUp(getMouseButtonIndex());
             confirmedDrag = false;
             confirmedMove = false;
             confirmedScroll = false;
+            isClickPending = false;
+            isDblClickPending = false;
+        }
+
+        // If a finger lifts while a tap's left button is still pending (not yet
+        // auto-released and not a confirmed drag), release it now so it cannot
+        // stay stuck down.
+        if (pointerCount < this.pointerCount && !isFlicking && !confirmedDrag &&
+                (leftButtonDown || isClickPending || isDblClickPending)) {
+            handler.removeCallbacksAndMessages(null);
+            mouseUp(MouseButtonPacket.BUTTON_LEFT);
+            leftButtonDown = false;
             isClickPending = false;
             isDblClickPending = false;
         }
