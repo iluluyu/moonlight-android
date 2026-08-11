@@ -23,6 +23,11 @@ import com.limelight.binding.input.evdev.EvdevListener;
 import com.limelight.binding.input.touch.TouchContext;
 import com.limelight.binding.input.touch.TrackpadContext;
 import com.limelight.binding.input.touch.TrackpadGestureClassifier;
+import com.limelight.binding.input.touch.TrackpadGestureConfiguration;
+import com.limelight.binding.input.touch.TrackpadRowBoundaryGuard;
+import com.limelight.binding.input.touch.TrackpadSelectionAccumulator;
+import com.limelight.binding.input.touch.TrackpadSwipeGestureDetector;
+import com.limelight.binding.input.touch.TrackpadVerticalIntentGate;
 import com.limelight.binding.input.virtual_controller.VirtualController;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardController;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardLayoutController;
@@ -197,16 +202,36 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
      *  gesture3LastDir, which belongs to the cross-stroke cooldown gate. */
     private int gesture3StrokeDir = 0;
     private boolean gesture3CanTap = false;
-    /** A 4th/5th contact cancels the 3-finger identity. Ignore the remainder of
-     *  that physical gesture rather than restarting when it falls back to 3. */
-    private boolean gesture3SuppressedUntilUp = false;
+    /** A new third contact may arrive before the other two fingers from the
+     *  previous committed stroke have fully lifted. Treat that deliberate quick
+     *  re-contact as a fast stroke instead of letting contact settling consume the
+     *  normal 200ms fast-swipe window. */
+    private boolean gesture3FastRecontact = false;
+    private static final float TP3_APP_SWITCH_STEP_PX = 90f;
+    private static final float TP3_APP_SWITCH_ROW_FIRST_STEP_PX = 135f;
+    private static final float TP3_APP_SWITCH_VERTICAL_INTENT_RATIO = 0.8f;
+    private static final int TP3_APP_SWITCH_MAX_STEPS_PER_SAMPLE = 4;
+    private final TrackpadSelectionAccumulator gesture3AppColumnSelection =
+            new TrackpadSelectionAccumulator(TP3_APP_SWITCH_STEP_PX,
+                    TP3_APP_SWITCH_MAX_STEPS_PER_SAMPLE);
+    private final TrackpadSelectionAccumulator gesture3AppRowSelection =
+            new TrackpadSelectionAccumulator(TP3_APP_SWITCH_ROW_FIRST_STEP_PX,
+                    TP3_APP_SWITCH_STEP_PX,
+                    TP3_APP_SWITCH_MAX_STEPS_PER_SAMPLE);
+    private final TrackpadRowBoundaryGuard gesture3AppRowBoundaryGuard =
+            new TrackpadRowBoundaryGuard();
+    private final TrackpadVerticalIntentGate gesture3AppVerticalIntentGate =
+            new TrackpadVerticalIntentGate(TP3_APP_SWITCH_VERTICAL_INTENT_RATIO);
+    /** A 5th contact cancels the supported multi-finger identity. Ignore the
+     *  remainder of that physical gesture rather than restarting at 4 or 3. */
+    private boolean multiFingerGestureSuppressedUntilUp = false;
     private float gesture3StartX = 0, gesture3StartY = 0;
     private float gesture3LastX = 0, gesture3LastY = 0;
     private float gesture3FireX = 0, gesture3FireY = 0;
     private float gesture3CumDX = 0, gesture3CumDY = 0;
-    /** While set, the 2-finger pinch detector stands down: right after a 3-finger
+    /** While set, the 2-finger pinch detector stands down: right after a 3/4-finger
      *  stroke ends, two still-down fingers might be moving apart in the tail. */
-    private long gesture3TailGuardUntil = 0;
+    private long multiFingerTailGuardUntil = 0;
     private static final int TP3_SWIPE_X = 150;    // px of 3-finger centroid travel (slow, deliberate)
     private static final int TP3_SWIPE_Y = 120;
     private static final int TP3_SWIPE_X_FAST = 60; // quick flicks cross a smaller threshold
@@ -216,7 +241,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private static final int TP3_TAP_MAX_MOVE = 30;
     private static final long TP3_COOLDOWN_MS = 250;   // same-direction repeat gate
     private static final int TP3_REVERSE_PX = 50;      // mid-stroke reversal re-arm
-    private static final long TP3_TAIL_GUARD_MS = 200; // 3->2 finger tail guard
+    private static final long MULTI_FINGER_TAIL_GUARD_MS = 200;
+    private final TrackpadSwipeGestureDetector gesture4Detector =
+            new TrackpadSwipeGestureDetector(TP3_SWIPE_X, TP3_SWIPE_Y,
+                    TP3_SWIPE_X_FAST, TP3_SWIPE_Y_FAST, TP3_REVERSE_PX,
+                    TP3_FAST_SWIPE_MAX_MS);
+    private boolean gesture4PrevDown = false;
+    private boolean fourFingerDesktopRestorePending = false;
 
     // On-device validation logging (debug builds only). LimeLog (java.util.logging)
     // silently drops everything on Android, so gesture decisions go through
@@ -271,51 +302,20 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private static final float PINCH_ZOOM_GAIN = 1.5f;           // finger separation px → wheel units
     private static final float PINCH_NOTCH_UNITS = 30f;          // scroll granularity (quarter of a wheel notch)
 
-    // Trackpad gesture "native feel": after 3-finger up opens Windows Task View
-    // (Win+Tab), left/right/up/down swipes navigate it with arrow keys; tap selects.
-    private boolean taskViewMode = false;
-    private long taskViewModeUntil = 0;
-    private static final long TASK_VIEW_TIMEOUT_MS = 8000;
-    /** Windows Task View animates open for ~300-400ms; arrow/Enter keys sent during
-     *  that window get dropped, so the first few navigation actions are buffered
-     *  until it has fully opened. */
-    private static final long TASK_VIEW_NAV_ARM_MS = 350;
-    private static final int TASK_VIEW_PENDING_NAV_LIMIT = 4;
-    private long taskViewNavArmedUntil = 0;
-    private Runnable pendingTaskViewNavRunnable = null;
-    private final Queue<Short> pendingTaskViewNavKeys = new ArrayDeque<>();
-
-    // Native-feel Alt+Tab switcher: Alt is held while the user cycles apps (each
-    // swipe = one Tab). Release is gesture-driven, not a long timer: Alt closes a
-    // short animation tail after the fingers lift, and a new 3-finger gesture within
-    // that tail cancels the release so rapid swipes keep the switcher open.
+    // Native-feel Alt+Tab switcher: Alt remains held while the same 3-finger stroke
+    // continuously selects apps. Lifting any finger releases Alt and confirms.
     private boolean altTabActive = false;
-    private static final long ALT_TAB_RELEASE_TAIL_MS = 500;
-    private final Runnable releaseAltTabRunnable = new Runnable() {
-        @Override
-        public void run() {
-            timerHandler.removeCallbacks(altTabSafetyRunnable);
-            if (altTabActive) {
-                conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_UP,
-                        (byte) 0, (byte) 0);
-                altTabActive = false;
-                LimeLog.info("Alt+Tab switcher closed");
-            }
-        }
-    };
-    /** Failsafe: if the gesture-driven release was ever missed, never leave Alt stuck
-     *  down (which would wedge the switcher open). This is a robustness guard, not a
-     *  UX timer — it only fires when the normal path failed. */
-    private static final long ALT_TAB_SAFETY_TIMEOUT_MS = 3000;
+    /** Hard backstop if Android ever loses the pointer-up/cancel event. */
+    private static final long ALT_TAB_SAFETY_TIMEOUT_MS = 15000;
     private final Runnable altTabSafetyRunnable = new Runnable() {
         @Override
         public void run() {
-            timerHandler.removeCallbacks(releaseAltTabRunnable);
             if (altTabActive) {
                 conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_UP,
                         (byte) 0, (byte) 0);
                 altTabActive = false;
                 LimeLog.warning("Alt+Tab safety release (stuck guard)");
+                if (tpLog()) Log.i(TP_LOG_TAG, "alt-tab safety release");
             }
         }
     };
@@ -1888,70 +1888,30 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     /** Maps trackpad multi-finger gestures detected from framework MotionEvents to
      *  Windows shortcuts. Shizuku is only used for keyboard capture. */
     private void handleTrackpadGesture(int gestureType) {
-        long now = SystemClock.uptimeMillis();
-        // Expire Task View navigation mode after a timeout; any gesture while active
-        // keeps it alive so the user can keep swiping to pick a window.
-        if (taskViewMode && now > taskViewModeUntil) {
-            taskViewMode = false;
-            cancelPendingTaskViewNav();
-            if (tpLog()) Log.i(TP_LOG_TAG, "task view timeout");
-        }
-        if (taskViewMode) {
-            taskViewModeUntil = now + TASK_VIEW_TIMEOUT_MS;
+        if (gestureType != com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START
+                && gestureType != com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END) {
+            fourFingerDesktopRestorePending = false;
         }
 
         switch (gestureType) {
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT:
-                if (taskViewMode) {
-                    postTaskViewKey((short) KeyboardTranslator.VK_LEFT);
-                } else {
-                    // Previous app (Alt+Shift+Tab) with the switcher held open.
-                    ensureAltTabHeld();
-                    sendTabWhileSwitching(true);
-                }
+                performTrackpadGestureAction(TrackpadGestureConfiguration.resolve(
+                        3, TrackpadGestureConfiguration.Direction.LEFT));
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT:
-                if (taskViewMode) {
-                    postTaskViewKey((short) KeyboardTranslator.VK_RIGHT);
-                } else {
-                    ensureAltTabHeld();
-                    sendTabWhileSwitching(false); // next app (Alt+Tab)
-                }
+                performTrackpadGestureAction(TrackpadGestureConfiguration.resolve(
+                        3, TrackpadGestureConfiguration.Direction.RIGHT));
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP:
-                if (taskViewMode) {
-                    postTaskViewKey((short) KeyboardTranslator.VK_UP);
-                } else {
-                    // Open Task View and enter navigation mode (all four directions pick).
-                    releaseAltTab();
-                    cancelPendingTaskViewNav();
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_TAB });
-                    taskViewMode = true;
-                    taskViewModeUntil = now + TASK_VIEW_TIMEOUT_MS;
-                    // Windows animates Task View open; buffer the first nav keys so
-                    // they aren't dropped while it's still settling.
-                    taskViewNavArmedUntil = now + TASK_VIEW_NAV_ARM_MS;
-                    if (tpLog()) Log.i(TP_LOG_TAG, "task view enter (nav armed " + TASK_VIEW_NAV_ARM_MS + "ms)");
-                }
+                performTrackpadGestureAction(TrackpadGestureConfiguration.resolve(
+                        3, TrackpadGestureConfiguration.Direction.UP));
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN:
-                if (taskViewMode) {
-                    postTaskViewKey((short) KeyboardTranslator.VK_DOWN);
-                } else {
-                    releaseAltTab();
-                    cancelPendingTaskViewNav();
-                    sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_D });
-                    taskViewMode = false;
-                }
+                performTrackpadGestureAction(TrackpadGestureConfiguration.resolve(
+                        3, TrackpadGestureConfiguration.Direction.DOWN));
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP:
-                if (taskViewMode) {
-                    // Select the highlighted window. Drop any buffered nav first so
-                    // it can't fire after the selection (Enter is re-posted last).
-                    cancelPendingTaskViewNav();
-                    postTaskViewKey((short) KeyboardTranslator.VK_RETURN);
-                    taskViewMode = false;
-                } else if (altTabActive) {
+                if (altTabActive) {
                     releaseAltTab(); // select the highlighted app
                 } else {
                     // Quick switch.
@@ -1960,90 +1920,103 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 }
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START:
-                // Three fingers landed. Deliberately no action here: cancelling the
-                // release on START alone could leave Alt stuck if a later END/swipe
-                // event was missed. The per-swipe tail re-arm handles rapid swipes,
-                // and the safety timeout is the backstop.
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END:
-                // Fingers lifted: close the switcher after the animation tail.
-                if (altTabActive) {
-                    timerHandler.removeCallbacks(releaseAltTabRunnable);
-                    timerHandler.postDelayed(releaseAltTabRunnable, ALT_TAB_RELEASE_TAIL_MS);
-                }
+                releaseAltTab();
                 break;
             default:
                 break;
         }
     }
 
-    /** Sends a single key tap into Task View. While Task View is still animating
-     *  open (arm window), keys are held in a small FIFO — Windows drops keys sent
-     *  during the animation, but dropping all except the last also loses deliberate
-     *  multi-swipe/reversal input. The bound prevents an accidental backlog. */
-    private void postTaskViewKey(final short vk) {
-        long wait = taskViewNavArmedUntil - SystemClock.uptimeMillis();
-        if (wait <= 0 && pendingTaskViewNavRunnable == null) {
-            sendTaskViewKey(vk);
-            if (tpLog()) Log.i(TP_LOG_TAG, "taskview key vk=" + vk + " immediate");
-            return;
+    private void handleFourFingerGesture(TrackpadGestureConfiguration.Direction direction) {
+        TrackpadGestureConfiguration.Action action =
+                TrackpadGestureConfiguration.resolveFourFingerSwipe(
+                        direction, fourFingerDesktopRestorePending);
+        if (action == TrackpadGestureConfiguration.Action.SHOW_DESKTOP) {
+            fourFingerDesktopRestorePending = true;
+        } else if (action != TrackpadGestureConfiguration.Action.NONE) {
+            fourFingerDesktopRestorePending = false;
         }
-
-        if (pendingTaskViewNavKeys.size() == TASK_VIEW_PENDING_NAV_LIMIT) {
-            pendingTaskViewNavKeys.poll();
+        if (tpLog()) {
+            Log.i(TP_LOG_TAG, "four-finger " + direction + " -> " + action);
         }
-        pendingTaskViewNavKeys.offer(vk);
-
-        if (pendingTaskViewNavRunnable != null) {
-            if (tpLog()) Log.i(TP_LOG_TAG, "taskview key vk=" + vk + " queued");
-            return;
-        }
-
-        pendingTaskViewNavRunnable = () -> {
-            pendingTaskViewNavRunnable = null;
-            Short queuedKey;
-            while ((queuedKey = pendingTaskViewNavKeys.poll()) != null) {
-                sendTaskViewKey(queuedKey);
-            }
-        };
-        timerHandler.postDelayed(pendingTaskViewNavRunnable, Math.max(0, wait));
-        if (tpLog()) Log.i(TP_LOG_TAG, "taskview key vk=" + vk + " wait=" + Math.max(0, wait) + "ms");
+        performTrackpadGestureAction(action);
     }
 
-    private void sendTaskViewKey(short vk) {
-        conn.sendKeyboardInput(vk, KeyboardPacket.KEY_DOWN, (byte) 0, (byte) 0);
-        conn.sendKeyboardInput(vk, KeyboardPacket.KEY_UP, (byte) 0, (byte) 0);
-    }
-
-    private void cancelPendingTaskViewNav() {
-        if (pendingTaskViewNavRunnable != null) {
-            timerHandler.removeCallbacks(pendingTaskViewNavRunnable);
+    private void handleFourFingerTap() {
+        fourFingerDesktopRestorePending = false;
+        TrackpadGestureConfiguration.Action action = TrackpadGestureConfiguration.resolveTap(4);
+        if (tpLog()) {
+            Log.i(TP_LOG_TAG, "four-finger TAP -> " + action);
         }
-        pendingTaskViewNavRunnable = null;
-        pendingTaskViewNavKeys.clear();
+        performTrackpadGestureAction(action);
     }
 
-    /** Opens the Alt+Tab switcher (Alt down) and keeps it open while the user cycles;
-     *  each swipe re-arms a release timer so the switcher closes (with its animation)
-     *  only after the user stops swiping. */
+    private void performTrackpadGestureAction(TrackpadGestureConfiguration.Action action) {
+        switch (action) {
+            case PREVIOUS_APP:
+                ensureAltTabHeld();
+                sendTabWhileSwitching(true);
+                break;
+            case NEXT_APP:
+                ensureAltTabHeld();
+                sendTabWhileSwitching(false);
+                break;
+            case OPEN_TASK_VIEW:
+                releaseAltTab();
+                sendKeys(new short[] {
+                        (short) KeyboardTranslator.VK_LWIN,
+                        (short) KeyboardTranslator.VK_TAB
+                });
+                if (tpLog()) Log.i(TP_LOG_TAG, "task view open");
+                break;
+            case SHOW_DESKTOP:
+            case RESTORE_WINDOWS:
+                releaseAltTab();
+                sendKeys(new short[] {
+                        (short) KeyboardTranslator.VK_LWIN,
+                        (short) KeyboardTranslator.VK_D
+                });
+                break;
+            case OPEN_NOTIFICATION_CENTER:
+                releaseAltTab();
+                sendKeys(new short[] {
+                        (short) KeyboardTranslator.VK_LWIN,
+                        (short) KeyboardTranslator.VK_N
+                });
+                break;
+            case PREVIOUS_DESKTOP:
+            case NEXT_DESKTOP:
+                releaseAltTab();
+                sendKeys(new short[] {
+                        (short) KeyboardTranslator.VK_LWIN,
+                        (short) KeyboardTranslator.VK_LCONTROL,
+                        (short) (action == TrackpadGestureConfiguration.Action.PREVIOUS_DESKTOP
+                                ? KeyboardTranslator.VK_LEFT : KeyboardTranslator.VK_RIGHT)
+                });
+                break;
+            case NONE:
+            default:
+                break;
+        }
+    }
+
+    /** Opens the Alt+Tab switcher (Alt down) and keeps it open while the user cycles. */
     private void ensureAltTabHeld() {
-        // A pending Task View select/nav key must not fire once we switched modes.
-        cancelPendingTaskViewNav();
         if (!altTabActive) {
             conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_DOWN,
                     KeyboardPacket.MODIFIER_ALT, (byte) 0);
             altTabActive = true;
             LimeLog.info("Alt+Tab switcher opened");
             if (tpLog()) Log.i(TP_LOG_TAG, "alt-tab open");
-            timerHandler.postDelayed(altTabSafetyRunnable, ALT_TAB_SAFETY_TIMEOUT_MS);
         }
-        timerHandler.removeCallbacks(releaseAltTabRunnable);
-        timerHandler.postDelayed(releaseAltTabRunnable, ALT_TAB_RELEASE_TAIL_MS);
+        timerHandler.removeCallbacks(altTabSafetyRunnable);
+        timerHandler.postDelayed(altTabSafetyRunnable, ALT_TAB_SAFETY_TIMEOUT_MS);
     }
 
     /** Closes the Alt+Tab switcher immediately (Alt up). */
     private void releaseAltTab() {
-        timerHandler.removeCallbacks(releaseAltTabRunnable);
         timerHandler.removeCallbacks(altTabSafetyRunnable);
         if (altTabActive) {
             conn.sendKeyboardInput((short) KeyboardTranslator.VK_LMENU, KeyboardPacket.KEY_UP,
@@ -2069,6 +2042,17 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             conn.sendKeyboardInput((short) KeyboardTranslator.VK_LSHIFT, KeyboardPacket.KEY_UP,
                     KeyboardPacket.MODIFIER_ALT, (byte) 0);
         }
+    }
+
+    /** Moves within the native Alt+Tab grid while Alt remains held. Horizontal
+     *  travel keeps the familiar MRU Tab cycle; vertical travel uses Up/Down so a
+     *  target in another grid row doesn't require stepping through every tile. */
+    private void sendGridDirectionWhileSwitching(short vk) {
+        ensureAltTabHeld();
+        conn.sendKeyboardInput(vk, KeyboardPacket.KEY_DOWN,
+                KeyboardPacket.MODIFIER_ALT, (byte) 0);
+        conn.sendKeyboardInput(vk, KeyboardPacket.KEY_UP,
+                KeyboardPacket.MODIFIER_ALT, (byte) 0);
     }
 
 
@@ -3609,9 +3593,9 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         return false;
     }
 
-    /** Detects 3-finger swipes/taps directly from framework MotionEvents (the events
-     *  DO reach us — re-verified). Returns true to consume 3-finger events entirely
-     *  (they are gesture-only; the 2-slot TrackpadContext can't use them anyway).
+    /** Detects 3/4-finger swipes and taps directly from framework MotionEvents (the
+     *  events DO reach us — re-verified). Returns true to consume supported
+     *  multi-finger events entirely (the 2-slot TrackpadContext can't use them).
      *
      *  <p>One stroke = at most one fire per direction: a swipe is consumed once it
      *  fires (or is swallowed as a same-direction repeat inside the cooldown) until
@@ -3632,12 +3616,14 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // lift, but never count it as a tap. Swallow only multi-finger cancels so
         // single-finger cancels still reach the touch contexts.
         if (action == MotionEvent.ACTION_CANCEL) {
-            boolean consumed = gesture3PrevDown || gesture3SuppressedUntilUp || pc >= 3;
+            boolean consumed = gesture3PrevDown || gesture4PrevDown
+                    || multiFingerGestureSuppressedUntilUp || pc >= 3;
             finishThreeFingerStroke(now, false);
-            gesture3SuppressedUntilUp = false;
+            finishFourFingerStroke(now);
+            multiFingerGestureSuppressedUntilUp = false;
             if (consumed) {
                 resetTrackpadContexts();
-                gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+                multiFingerTailGuardUntil = now + MULTI_FINGER_TAIL_GUARD_MS;
                 if (tpLog()) Log.i(TP_LOG_TAG, "CANCEL: stroke torn down");
             }
             return consumed;
@@ -3647,27 +3633,75 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // required by MotionEvent's delivery contract.
         if (action == MotionEvent.ACTION_DOWN) {
             finishThreeFingerStroke(now, false);
-            gesture3SuppressedUntilUp = false;
+            finishFourFingerStroke(now);
+            multiFingerGestureSuppressedUntilUp = false;
+            gesture3LastDir = 0;
+            gesture3LastFireMs = 0;
         }
 
-        // Gesture identity is tied to its finger count. A fourth contact cancels the
-        // three-finger stroke; don't silently use an arbitrary first-three subset.
-        if (pc > 3) {
-            if (!gesture3SuppressedUntilUp) {
+        // Gesture identity is tied to its finger count. A fifth contact cancels the
+        // supported 3/4-finger identities; don't use an arbitrary subset.
+        if (pc > 4) {
+            if (!multiFingerGestureSuppressedUntilUp) {
                 finishThreeFingerStroke(now, false);
-                gesture3SuppressedUntilUp = true;
+                finishFourFingerStroke(now);
+                multiFingerGestureSuppressedUntilUp = true;
                 resetTrackpadContexts();
-                gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+                multiFingerTailGuardUntil = now + MULTI_FINGER_TAIL_GUARD_MS;
                 if (tpLog()) Log.i(TP_LOG_TAG, "stroke suppressed: pointer count=" + pc);
             }
             return true;
         }
 
-        if (gesture3SuppressedUntilUp) {
+        if (multiFingerGestureSuppressedUntilUp) {
             if (action == MotionEvent.ACTION_UP) {
-                gesture3SuppressedUntilUp = false;
-                gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+                multiFingerGestureSuppressedUntilUp = false;
+                multiFingerTailGuardUntil = now + MULTI_FINGER_TAIL_GUARD_MS;
                 if (tpLog()) Log.i(TP_LOG_TAG, "suppressed stroke fully lifted");
+            }
+            return true;
+        }
+
+        // ACTION_POINTER_UP still includes the pointer being lifted. End the
+        // four-finger identity on that frame, then suppress its 4->3->2 tail until
+        // every contact lifts so it cannot become a three-finger action.
+        boolean fourFingerPointerUp = pc == 4 && action == MotionEvent.ACTION_POINTER_UP;
+        if (pc == 4) {
+            float cx = 0;
+            float cy = 0;
+            for (int i = 0; i < 4; i++) {
+                cx += event.getX(i);
+                cy += event.getY(i);
+            }
+            cx /= 4f;
+            cy /= 4f;
+
+            if (fourFingerPointerUp) {
+                boolean tap = gesture4PrevDown && gesture4Detector.isTap(cx, cy, now,
+                        TP3_TAP_MAX_DURATION_MS, TP3_TAP_MAX_MOVE);
+                finishFourFingerStroke(now);
+                multiFingerGestureSuppressedUntilUp = true;
+                if (tap) {
+                    handleFourFingerTap();
+                }
+                return true;
+            }
+
+            if (!gesture4PrevDown) {
+                finishThreeFingerStroke(now, false);
+                gesture4PrevDown = true;
+                gesture4Detector.start(cx, cy, now);
+                resetPinchState();
+                resetTrackpadContexts();
+                if (tpLog()) Log.i(TP_LOG_TAG, "four-finger stroke start");
+            }
+
+            if (action == MotionEvent.ACTION_MOVE) {
+                TrackpadGestureConfiguration.Direction direction =
+                        gesture4Detector.move(cx, cy, now);
+                if (direction != null) {
+                    handleFourFingerGesture(direction);
+                }
             }
             return true;
         }
@@ -3682,6 +3716,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             float cy = (event.getY(0) + event.getY(1) + event.getY(2)) / 3f;
 
             if (!gesture3PrevDown) {
+                gesture3FastRecontact = now < multiFingerTailGuardUntil;
+                // A supported three-finger identity is active again, so the old
+                // 3->2 tail guard no longer describes the current contacts.
+                multiFingerTailGuardUntil = 0;
+                gesture3LastDir = 0;
+                gesture3LastFireMs = 0;
                 gesture3PrevDown = true;
                 handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START);
                 // Arm a fresh gesture immediately; direction-aware gating happens at
@@ -3693,10 +3733,15 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 gesture3CumDX = gesture3CumDY = 0;
                 gesture3StrokeDir = 0;
                 gesture3CanTap = true;
+                gesture3AppColumnSelection.finish();
+                gesture3AppRowSelection.finish();
+                gesture3AppRowBoundaryGuard.reset();
+                gesture3AppVerticalIntentGate.finish();
                 // The stroke is now 3-finger; whatever 2-finger identity the pinch
                 // detector was building is void.
                 resetPinchState();
-                if (tpLog()) Log.i(TP_LOG_TAG, "stroke start");
+                if (tpLog()) Log.i(TP_LOG_TAG, "stroke start"
+                        + (gesture3FastRecontact ? " (fast recontact)" : ""));
             }
 
             if (action == MotionEvent.ACTION_MOVE) {
@@ -3709,7 +3754,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     // Fast flicks cross a smaller threshold so a quick swipe fires
                     // while it's still fast; slow deliberate swipes need full travel.
                     long elapsed = now - gesture3StartMs;
-                    boolean fast = elapsed < TP3_FAST_SWIPE_MAX_MS;
+                    boolean fast = gesture3FastRecontact
+                            || elapsed < TP3_FAST_SWIPE_MAX_MS;
                     float thrX = fast ? TP3_SWIPE_X_FAST : TP3_SWIPE_X;
                     float thrY = fast ? TP3_SWIPE_Y_FAST : TP3_SWIPE_Y;
                     float dominantRatio = fast ? 1.3f : 1.5f;
@@ -3740,10 +3786,23 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                         // Same-direction repeat inside the cooldown is swallowed (the
                         // previous fire is still settling); reversing direction fires
                         // immediately — "change your mind" while cycling must not wait.
-                        if (dir != gesture3LastDir || now - gesture3LastFireMs > TP3_COOLDOWN_MS) {
+                        // Once a picker is open, every distinct swipe is an intentional
+                        // one-step selection. Don't drop a rapid second stroke just
+                        // because it has the same direction as the first one.
+                        boolean continuousSelection = altTabActive;
+                        if (continuousSelection || dir != gesture3LastDir
+                                || now - gesture3LastFireMs > TP3_COOLDOWN_MS) {
                             gesture3LastDir = dir;
                             gesture3LastFireMs = now;
                             handleTrackpadGesture(dir);
+                            if ((dir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT
+                                    || dir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT)
+                                    && altTabActive) {
+                                gesture3AppColumnSelection.start(cx);
+                                gesture3AppRowSelection.start(cy);
+                                gesture3AppRowBoundaryGuard.reset();
+                                gesture3AppVerticalIntentGate.start(cx, cy);
+                            }
                             if (tpLog()) Log.i(TP_LOG_TAG, "fire " + tpGestureName(dir)
                                     + " dx=" + (int) gesture3CumDX + " dy=" + (int) gesture3CumDY
                                     + " t=" + elapsed + "ms" + (fast ? " fast" : " slow"));
@@ -3754,6 +3813,49 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                         // Either way this stroke is consumed until the fingers lift
                         // (or reverse — see below), so a long swipe can't re-fire.
                         gesture3Active = false;
+                        gesture3FastRecontact = false;
+                    }
+                } else if (gesture3AppColumnSelection.isActive()) {
+                    int columnSteps = gesture3AppColumnSelection.move(cx);
+                    boolean rowIntentRebased = gesture3AppVerticalIntentGate.move(
+                            cx, cy, columnSteps != 0);
+                    if (rowIntentRebased) {
+                        gesture3AppRowSelection.rebase(cy);
+                    }
+                    if (columnSteps != 0) {
+                        gesture3AppRowBoundaryGuard.onHorizontalSelectionChanged();
+                    }
+                    int remaining = Math.abs(columnSteps);
+                    while (remaining-- > 0) {
+                        performTrackpadGestureAction(columnSteps < 0
+                                        ? TrackpadGestureConfiguration.Action.PREVIOUS_APP
+                                        : TrackpadGestureConfiguration.Action.NEXT_APP);
+                    }
+
+                    int accumulatedRowSteps = gesture3AppRowSelection.move(cy);
+                    int intentRowSteps = accumulatedRowSteps;
+                    int rowIntentSuppressed = 0;
+                    if (accumulatedRowSteps != 0
+                            && !gesture3AppVerticalIntentGate.acceptVerticalStep(cy)) {
+                        rowIntentSuppressed = Math.abs(accumulatedRowSteps);
+                        intentRowSteps = 0;
+                        gesture3AppRowSelection.rebase(cy);
+                    }
+                    int rowSteps = gesture3AppRowBoundaryGuard.filterSteps(intentRowSteps);
+                    remaining = Math.abs(rowSteps);
+                    while (remaining-- > 0) {
+                        sendGridDirectionWhileSwitching((short) (rowSteps < 0
+                                ? KeyboardTranslator.VK_UP : KeyboardTranslator.VK_DOWN));
+                    }
+                    if ((columnSteps != 0 || accumulatedRowSteps != 0) && tpLog()) {
+                        Log.i(TP_LOG_TAG, "app selector continuous grid columns="
+                                + columnSteps + " rows=" + rowSteps
+                                + (rowIntentRebased ? " rowIntentRebased" : "")
+                                + (rowIntentSuppressed != 0
+                                ? " rowIntentSuppressed=" + rowIntentSuppressed : "")
+                                + (intentRowSteps != rowSteps
+                                ? " rowBoundarySuppressed=" + (Math.abs(intentRowSteps)
+                                - Math.abs(rowSteps)) : ""));
                     }
                 } else if (gesture3StrokeDir != 0) {
                     // A swipe already fired in this stroke. Watch for a direction
@@ -3799,33 +3901,72 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             gesture3Active = false;
             gesture3CanTap = false;
             gesture3StrokeDir = 0;
+            gesture3FastRecontact = false;
+            gesture3AppColumnSelection.finish();
+            gesture3AppRowSelection.finish();
+            gesture3AppRowBoundaryGuard.reset();
+            gesture3AppVerticalIntentGate.finish();
             return;
         }
 
-        gesture3PrevDown = false;
-        handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
+        boolean tap = false;
         if (allowTap && gesture3Active && gesture3CanTap) {
             long duration = now - gesture3StartMs;
             float move = Math.abs(gesture3LastX - gesture3StartX)
                     + Math.abs(gesture3LastY - gesture3StartY);
             if (duration < TP3_TAP_MAX_DURATION_MS && move < TP3_TAP_MAX_MOVE) {
-                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP);
+                tap = true;
                 if (tpLog()) Log.i(TP_LOG_TAG, "tap (dur=" + duration + "ms move=" + (int) move + "px)");
             }
         }
+        if (!tap && gesture3Active && gesture3CanTap && tpLog()) {
+            Log.i(TP_LOG_TAG, "stroke ended without fire dx=" + (int) gesture3CumDX
+                    + " dy=" + (int) gesture3CumDY
+                    + " t=" + (now - gesture3StartMs) + "ms"
+                    + (gesture3FastRecontact ? " fast-recontact" : ""));
+        }
+
+        gesture3PrevDown = false;
+        if (tap) {
+            // TAP must run before END so the one-shot Alt+Tab opened by a tap is
+            // released and committed by the same physical stroke.
+            handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP);
+        }
+        handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
 
         gesture3Active = false;
         gesture3CanTap = false;
         gesture3StrokeDir = 0;
+        gesture3FastRecontact = false;
+        gesture3AppColumnSelection.finish();
+        gesture3AppRowSelection.finish();
+        gesture3AppRowBoundaryGuard.reset();
+        gesture3AppVerticalIntentGate.finish();
         resetTrackpadContexts();
-        gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
-        if (tpLog()) Log.i(TP_LOG_TAG, "stroke end (tail guard " + TP3_TAIL_GUARD_MS + "ms)");
+        multiFingerTailGuardUntil = now + MULTI_FINGER_TAIL_GUARD_MS;
+        if (tpLog()) Log.i(TP_LOG_TAG, "stroke end (tail guard "
+                + MULTI_FINGER_TAIL_GUARD_MS + "ms)");
     }
 
-    /** The TrackpadContext slots froze while the 3-finger stroke consumed everything;
-     *  a partial lift (3->2 fingers) would otherwise read as a stale 2-finger scroll
-     *  or pinch. Cancelling them makes all subsequent events no-ops until the next
-     *  gesture's first finger DOWN re-initialises them. */
+    private void finishFourFingerStroke(long now) {
+        if (!gesture4PrevDown && !gesture4Detector.isTracking()) {
+            return;
+        }
+
+        gesture4PrevDown = false;
+        gesture4Detector.finish();
+        resetTrackpadContexts();
+        multiFingerTailGuardUntil = now + MULTI_FINGER_TAIL_GUARD_MS;
+        if (tpLog()) {
+            Log.i(TP_LOG_TAG, "four-finger stroke end (tail guard "
+                    + MULTI_FINGER_TAIL_GUARD_MS + "ms)");
+        }
+    }
+
+    /** The TrackpadContext slots froze while the 3/4-finger stroke consumed everything;
+     *  a partial lift would otherwise read as a stale 2-finger scroll or pinch.
+     *  Cancelling them makes all subsequent events no-ops until the next gesture's
+     *  first finger DOWN re-initialises them. */
     private void resetTrackpadContexts() {
         for (TouchContext tc : trackpadContextMap) {
             if (tc != null) {
@@ -3850,19 +3991,23 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         releaseAltTab();
         resetPinchState();
-        cancelPendingTaskViewNav();
-        taskViewMode = false;
-        taskViewModeUntil = 0;
-        taskViewNavArmedUntil = 0;
 
         gesture3Active = false;
         gesture3PrevDown = false;
         gesture3CanTap = false;
         gesture3StrokeDir = 0;
-        gesture3SuppressedUntilUp = false;
+        gesture3FastRecontact = false;
+        multiFingerGestureSuppressedUntilUp = false;
         gesture3LastDir = 0;
         gesture3LastFireMs = 0;
-        gesture3TailGuardUntil = 0;
+        gesture4PrevDown = false;
+        gesture4Detector.finish();
+        gesture3AppColumnSelection.finish();
+        gesture3AppRowSelection.finish();
+        gesture3AppRowBoundaryGuard.reset();
+        gesture3AppVerticalIntentGate.finish();
+        fourFingerDesktopRestorePending = false;
+        multiFingerTailGuardUntil = 0;
 
         resetTrackpadContexts();
         if (conn != null) {
@@ -3905,7 +4050,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 || event.getActionMasked() != MotionEvent.ACTION_MOVE
                 || event.getPointerCount() < 1
                 || event.getPointerCount() > trackpadContextMap.length
-                || event.getEventTime() < gesture3TailGuardUntil) {
+                || event.getEventTime() < multiFingerTailGuardUntil) {
             return false;
         }
 
@@ -3931,7 +4076,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private boolean handleCapturedTrackpadPointerMove(MotionEvent event) {
         if (event.getActionMasked() != MotionEvent.ACTION_MOVE
                 || event.getPointerCount() != 1
-                || event.getEventTime() < gesture3TailGuardUntil
+                || event.getEventTime() < multiFingerTailGuardUntil
                 || trackpadContextMap[0].isCancelled()
                 || !(trackpadContextMap[0] instanceof TrackpadContext)
                 || !inputCaptureProvider.eventHasRelativeMouseAxes(event)) {
@@ -4045,7 +4190,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
 
         // Tail of a 3-finger stroke: two fingers still down must not start a pinch.
-        if (now < gesture3TailGuardUntil) {
+        if (now < multiFingerTailGuardUntil) {
             return false;
         }
 

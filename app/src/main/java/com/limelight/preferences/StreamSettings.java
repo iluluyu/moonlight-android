@@ -50,6 +50,7 @@ import com.limelight.GameMenu;
 import com.limelight.LimeLog;
 import com.limelight.PcView;
 import com.limelight.R;
+import com.limelight.binding.input.shizuku.ShizukuKeyCapture;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardControllerConfigurationLoader;
 import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.utils.Dialog;
@@ -335,26 +336,23 @@ public class StreamSettings extends AppCompatActivity {
         public void initializePreferences() {
             addPreferencesFromResource(R.xml.preferences);
 
-            // Show which keyboard-capture backend is currently in effect.
-            Preference captureStatus = findPreference("keyboard_capture_status");
-            if (captureStatus != null) {
-                com.limelight.binding.input.shizuku.ShizukuKeyCapture.State shizukuState =
-                        com.limelight.binding.input.shizuku.ShizukuKeyCapture.checkState();
-                String enabledServices = android.provider.Settings.Secure.getString(
-                        requireActivity().getContentResolver(),
-                        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-                boolean accEnabled = enabledServices != null
-                        && enabledServices.contains(com.limelight.BuildConfig.APPLICATION_ID);
-                String summary;
-                if (shizukuState == com.limelight.binding.input.shizuku.ShizukuKeyCapture.State.GRANTED) {
-                    summary = getString(R.string.keyboard_capture_status_shizuku);
-                } else {
-                    summary = (accEnabled ? getString(R.string.keyboard_capture_status_accessibility)
-                                          : getString(R.string.keyboard_capture_status_framework))
-                            + "\n" + getString(R.string.keyboard_capture_shizuku_not_granted,
-                                                shizukuState.name());
+            ListPreference captureMode = findPreference(
+                    PreferenceConfiguration.KEYBOARD_CAPTURE_MODE_PREF_STRING);
+            if (captureMode != null) {
+                if ("auto".equals(captureMode.getValue())) {
+                    // "Auto" and "Shizuku" used the same runtime path. Normalize
+                    // the legacy value now that the duplicate UI option is gone.
+                    captureMode.setValue("shizuku");
                 }
-                captureStatus.setSummary(summary);
+                updateKeyboardCaptureModeSummary(captureMode, captureMode.getValue());
+                captureMode.setOnPreferenceChangeListener((preference, newValue) -> {
+                    String value = String.valueOf(newValue);
+                    updateKeyboardCaptureModeSummary(captureMode, value);
+                    if ("shizuku".equals(value)) {
+                        ShizukuKeyCapture.ensurePermission();
+                    }
+                    return true;
+                });
             }
             PreferenceScreen screen = getPreferenceScreen();
 
@@ -977,6 +975,70 @@ public class StreamSettings extends AppCompatActivity {
                         return false;
                     }
                 });
+            }
+        }
+
+        private void updateKeyboardCaptureModeSummary(ListPreference preference, String value) {
+            int selectedIndex = preference.findIndexOfValue(value);
+            if (selectedIndex < 0) {
+                value = "shizuku";
+                selectedIndex = preference.findIndexOfValue(value);
+            }
+
+            String enabledServices = android.provider.Settings.Secure.getString(
+                    requireActivity().getContentResolver(),
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            boolean accessibilityEnabled = enabledServices != null
+                    && enabledServices.contains(BuildConfig.APPLICATION_ID);
+            ShizukuKeyCapture.State shizukuState = ShizukuKeyCapture.checkState();
+
+            String activeBackend;
+            if ("accessibility".equals(value)) {
+                activeBackend = accessibilityEnabled
+                        ? getString(R.string.keyboard_capture_status_accessibility)
+                        : getString(R.string.keyboard_capture_accessibility_disabled);
+            } else if ("off".equals(value)) {
+                activeBackend = getString(R.string.keyboard_capture_status_framework);
+            } else if (shizukuState == ShizukuKeyCapture.State.GRANTED) {
+                activeBackend = getString(R.string.keyboard_capture_status_shizuku);
+            } else {
+                String fallback = accessibilityEnabled
+                        ? getString(R.string.keyboard_capture_status_accessibility)
+                        : getString(R.string.keyboard_capture_status_framework);
+                activeBackend = getString(R.string.keyboard_capture_shizuku_unavailable,
+                        getShizukuStateLabel(shizukuState), fallback);
+            }
+
+            CharSequence selectedEntry = selectedIndex >= 0
+                    ? preference.getEntries()[selectedIndex]
+                    : getString(R.string.keyboard_capture_mode_shizuku);
+            preference.setSummary(getString(R.string.summary_keyboard_capture_mode_state,
+                    selectedEntry, activeBackend));
+        }
+
+        private String getShizukuStateLabel(ShizukuKeyCapture.State state) {
+            switch (state) {
+                case UNSUPPORTED_TOO_OLD:
+                    return getString(R.string.keyboard_capture_shizuku_unsupported);
+                case NOT_INSTALLED:
+                    return getString(R.string.keyboard_capture_shizuku_not_running);
+                case VERSION_TOO_OLD:
+                    return getString(R.string.keyboard_capture_shizuku_version_too_old);
+                case NOT_GRANTED:
+                    return getString(R.string.keyboard_capture_shizuku_permission_required);
+                case GRANTED:
+                default:
+                    return getString(R.string.keyboard_capture_shizuku_ready);
+            }
+        }
+
+        @Override
+        public void onResume() {
+            super.onResume();
+            ListPreference captureMode = findPreference(
+                    PreferenceConfiguration.KEYBOARD_CAPTURE_MODE_PREF_STRING);
+            if (captureMode != null) {
+                updateKeyboardCaptureModeSummary(captureMode, captureMode.getValue());
             }
         }
 

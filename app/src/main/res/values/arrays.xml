@@ -201,13 +201,11 @@
     </string-array>
 
     <string-array name="keyboard_capture_mode_names">
-        <item>@string/keyboard_capture_mode_auto</item>
         <item>@string/keyboard_capture_mode_shizuku</item>
         <item>@string/keyboard_capture_mode_accessibility</item>
         <item>@string/keyboard_capture_mode_off</item>
     </string-array>
     <string-array name="keyboard_capture_mode_values" translatable="false">
-        <item>auto</item>
         <item>shizuku</item>
         <item>accessibility</item>
         <item>off</item>

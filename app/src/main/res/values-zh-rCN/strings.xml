@@ -719,15 +719,18 @@
     <!-- 物理键盘捕获后端 (Shizuku vs 无障碍) -->
     <string name="title_keyboard_capture_mode">键盘捕获方式</string>
     <string name="summary_keyboard_capture_mode">串流时如何捕获物理键盘（推荐 Shizuku，可屏蔽系统快捷键）</string>
-    <string name="title_keyboard_capture_status">当前使用的权限</string>
-    <string name="summary_keyboard_capture_status">正在检测…</string>
-    <string name="keyboard_capture_mode_auto">自动（优先 Shizuku）</string>
-    <string name="keyboard_capture_mode_shizuku">Shizuku（屏蔽系统快捷键）</string>
+    <string name="summary_keyboard_capture_mode_state">已选择：%1$s\n%2$s</string>
+    <string name="keyboard_capture_mode_shizuku">Shizuku（推荐）</string>
     <string name="keyboard_capture_mode_accessibility">无障碍服务</string>
     <string name="keyboard_capture_mode_off">关闭（仅框架）</string>
-    <string name="keyboard_capture_shizuku_granted">Shizuku：就绪（将被使用）</string>
-    <string name="keyboard_capture_shizuku_not_granted">Shizuku：%1$s（回退到无障碍/框架）</string>
-    <string name="keyboard_capture_status_shizuku">当前：Shizuku（内核独占抓取，屏蔽 OPPO Win→AI 等系统快捷键）</string>
-    <string name="keyboard_capture_status_accessibility">当前：无障碍服务</string>
-    <string name="keyboard_capture_status_framework">当前：框架（系统快捷键可能拦截按键）</string>
+    <string name="keyboard_capture_status_shizuku">当前生效：Shizuku 内核独占捕获（屏蔽 OPPO Win→AI 等系统快捷键）</string>
+    <string name="keyboard_capture_status_accessibility">当前生效：无障碍服务</string>
+    <string name="keyboard_capture_status_framework">当前生效：Android 框架（系统快捷键可能拦截按键）</string>
+    <string name="keyboard_capture_accessibility_disabled">已选择无障碍服务，但尚未在 Android 设置中启用</string>
+    <string name="keyboard_capture_shizuku_unavailable">Shizuku 不可用：%1$s。%2$s</string>
+    <string name="keyboard_capture_shizuku_unsupported">Android 版本不支持</string>
+    <string name="keyboard_capture_shizuku_not_running">服务未安装或未运行</string>
+    <string name="keyboard_capture_shizuku_version_too_old">服务版本过旧</string>
+    <string name="keyboard_capture_shizuku_permission_required">需要授权；重新选择 Shizuku 可发起授权</string>
+    <string name="keyboard_capture_shizuku_ready">已就绪</string>
 </resources>

@@ -726,6 +726,18 @@
     <string name="title_low_latency_frame_balance">LFR (Experimental)</string>
     <string name="summary_low_latency_frame_balance">Minimizes delay by dropping queued frames.</string>
     <string name="category_perf_monitor_settings">Performance Monitor</string>
+    <string name="category_perf_charts">Performance Charts</string>
+    <string name="desc_chart_latency">Network latency chart</string>
+    <string name="desc_chart_decode">Decode time chart</string>
+    <string name="desc_chart_fps">FPS chart</string>
+    <string name="title_enable_perf_charts">Enable performance charts</string>
+    <string name="summary_enable_perf_charts">Show performance charts in the game overlay</string>
+    <string name="title_perf_chart_latency">Chart: Network latency</string>
+    <string name="summary_perf_chart_latency">Average network latency (ms)</string>
+    <string name="title_perf_chart_decode">Chart: Decode time</string>
+    <string name="summary_perf_chart_decode">Frame decode time (ms)</string>
+    <string name="title_perf_chart_fps">Chart: FPS</string>
+    <string name="summary_perf_chart_fps">Incoming and rendered frames per second</string>
 
     <string name="title_checkbox_full_screen">Enable Full Screen</string>
     <string name="summary_checkbox_full_screen">Hide system bars with immersive mode</string>
@@ -733,15 +745,18 @@
     <!-- Physical keyboard capture backend (Shizuku vs Accessibility) -->
     <string name="title_keyboard_capture_mode">Keyboard capture</string>
     <string name="summary_keyboard_capture_mode">How Artemis captures the physical keyboard during streaming</string>
-    <string name="title_keyboard_capture_status">Active backend</string>
-    <string name="summary_keyboard_capture_status">Determining…</string>
-    <string name="keyboard_capture_mode_auto">Auto (prefer Shizuku)</string>
-    <string name="keyboard_capture_mode_shizuku">Shizuku (blocks system shortcuts)</string>
+    <string name="summary_keyboard_capture_mode_state">Selected: %1$s\n%2$s</string>
+    <string name="keyboard_capture_mode_shizuku">Shizuku (recommended)</string>
     <string name="keyboard_capture_mode_accessibility">Accessibility service</string>
     <string name="keyboard_capture_mode_off">Off (framework only)</string>
-    <string name="keyboard_capture_shizuku_granted">Shizuku: ready (will be used)</string>
-    <string name="keyboard_capture_shizuku_not_granted">Shizuku: %1$s — accessibility/framework fallback</string>
-    <string name="keyboard_capture_status_shizuku">Backend: Shizuku (exclusive kernel grab, blocks OEM shortcuts like OPPO Win→AI)</string>
-    <string name="keyboard_capture_status_accessibility">Backend: Accessibility service</string>
-    <string name="keyboard_capture_status_framework">Backend: Framework (system shortcuts may intercept keys)</string>
+    <string name="keyboard_capture_status_shizuku">Active: Shizuku exclusive capture (blocks OEM shortcuts such as OPPO Win→AI)</string>
+    <string name="keyboard_capture_status_accessibility">Active: Accessibility service</string>
+    <string name="keyboard_capture_status_framework">Active: Android framework (system shortcuts may intercept keys)</string>
+    <string name="keyboard_capture_accessibility_disabled">Accessibility service is selected but not enabled in Android settings</string>
+    <string name="keyboard_capture_shizuku_unavailable">Shizuku unavailable: %1$s. %2$s</string>
+    <string name="keyboard_capture_shizuku_unsupported">Android version is unsupported</string>
+    <string name="keyboard_capture_shizuku_not_running">service is not installed or running</string>
+    <string name="keyboard_capture_shizuku_version_too_old">service version is too old</string>
+    <string name="keyboard_capture_shizuku_permission_required">permission is required; select Shizuku to request it</string>
+    <string name="keyboard_capture_shizuku_ready">ready</string>
 </resources>

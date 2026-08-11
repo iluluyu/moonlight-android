@@ -236,7 +236,7 @@ public class PreferenceConfiguration {
     public String customRefreshRate;
     public int meteredBitrate;
     public enum KeyboardCaptureMode {
-        AUTO, SHIZUKU, ACCESSIBILITY, OFF
+        SHIZUKU, ACCESSIBILITY, OFF
     }
 
     public FormatOption videoFormat;
@@ -714,20 +714,23 @@ private static int getFramePacingValue(Context context) {
                 Build.FINGERPRINT.contains("PPR1.180610.011/4079208_2235.1395");
     }
 
-    private static final String KEYBOARD_CAPTURE_MODE_PREF_STRING = "list_keyboard_capture_mode";
-    private static final String DEFAULT_KEYBOARD_CAPTURE_MODE = "auto";
+    static final String KEYBOARD_CAPTURE_MODE_PREF_STRING = "list_keyboard_capture_mode";
+    private static final String DEFAULT_KEYBOARD_CAPTURE_MODE = "shizuku";
 
-    private static KeyboardCaptureMode getKeyboardCaptureMode(Context context) {
-        SharedPreferences prefs = ProfilesManager.getInstance().getOverlayingSharedPreferences(context);
-        String str = prefs.getString(KEYBOARD_CAPTURE_MODE_PREF_STRING, DEFAULT_KEYBOARD_CAPTURE_MODE);
-        if ("shizuku".equals(str)) {
-            return KeyboardCaptureMode.SHIZUKU;
-        } else if ("accessibility".equals(str)) {
+    private static KeyboardCaptureMode getKeyboardCaptureMode(SharedPreferences prefs) {
+        return parseKeyboardCaptureMode(prefs.getString(
+                KEYBOARD_CAPTURE_MODE_PREF_STRING, DEFAULT_KEYBOARD_CAPTURE_MODE));
+    }
+
+    static KeyboardCaptureMode parseKeyboardCaptureMode(String value) {
+        if ("accessibility".equals(value)) {
             return KeyboardCaptureMode.ACCESSIBILITY;
-        } else if ("off".equals(str)) {
+        } else if ("off".equals(value)) {
             return KeyboardCaptureMode.OFF;
         } else {
-            return KeyboardCaptureMode.AUTO;
+            // Shizuku is both the default and the safe fallback for the legacy
+            // "auto" value or any unknown value.
+            return KeyboardCaptureMode.SHIZUKU;
         }
     }
 
@@ -878,7 +881,7 @@ private static int getFramePacingValue(Context context) {
         config.videoScaleMode = getVideoScaleMode(context);
 
         config.videoFormat = getVideoFormatValue(context);
-        config.keyboardCaptureMode = getKeyboardCaptureMode(context);
+        config.keyboardCaptureMode = getKeyboardCaptureMode(prefs);
         config.framePacing = getFramePacingValue(context);
         config.preferLowerDelays = getPreferLowerDelays(context);
 
@@ -1024,7 +1027,6 @@ private static int getFramePacingValue(Context context) {
         config.trackpadDragDropVibration = prefs.getBoolean(CHECKBOX_TRACKPAD_DRAG_DROP_VIBRATION, DEFAULT_TRACKPAD_DRAG_DROP_VIBRATION);
         config.trackpadDragDropThreshold = prefs.getInt(SEEKBAR_TRACKPAD_DRAG_DROP_THRESHOLD, DEFAULT_TRACKPAD_DRAG_DROP_THRESHOLD);
         config.trackpadSwapAxis = prefs.getBoolean(CHECKBOX_TRACKPAD_SWAP_AXIS, DEFAULT_TRACKPAD_SWAP_AXIS);
-
         config.absoluteMouseMode = prefs.getBoolean(ABSOLUTE_MOUSE_MODE_PREF_STRING, DEFAULT_ABSOLUTE_MOUSE_MODE);
         config.enableBatteryReport = prefs.getBoolean(CHECKBOX_ENABLE_BATTERY_REPORT, DEFAULT_GAMEPAD_ENABLE_BATTERY_REPORT);
         config.forceQwerty = prefs.getBoolean(CHECKBOX_FORCE_QWERTY, DEFAULT_FORCE_QWERTY);
