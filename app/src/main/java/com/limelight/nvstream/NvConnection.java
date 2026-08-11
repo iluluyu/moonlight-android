@@ -69,6 +69,9 @@ public class NvConnection {
         this.context.riKeyId = generateRiKeyId();
 
         this.isMonkey = ActivityManager.isUserAMonkey();
+        if (isMonkey) {
+            LimeLog.warning("Remote input is disabled because Android reports monkey mode");
+        }
     }
     
     private static SecretKey generateRiAesKey() {

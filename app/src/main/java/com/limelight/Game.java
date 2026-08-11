@@ -8,6 +8,7 @@ import static com.limelight.utils.ExternalDisplayControlActivity.closeExternalDi
 import static com.limelight.utils.ServerHelper.getActiveDisplay;
 import static com.limelight.utils.ServerHelper.getSecondaryDisplay;
 
+import com.limelight.BuildConfig;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.input.ControllerHandler;
@@ -21,6 +22,7 @@ import com.limelight.binding.input.driver.UsbDriverService;
 import com.limelight.binding.input.evdev.EvdevListener;
 import com.limelight.binding.input.touch.TouchContext;
 import com.limelight.binding.input.touch.TrackpadContext;
+import com.limelight.binding.input.touch.TrackpadGestureClassifier;
 import com.limelight.binding.input.virtual_controller.VirtualController;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardController;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardLayoutController;
@@ -84,8 +86,10 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PersistableBundle;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.util.Log;
 import android.util.Rational;
 import android.view.Display;
 import android.view.Gravity;
@@ -189,6 +193,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private long gesture3StartMs = 0;
     private long gesture3LastFireMs = 0;
     private int gesture3LastDir = 0;
+    /** Direction recognized in the current physical stroke. Kept separate from
+     *  gesture3LastDir, which belongs to the cross-stroke cooldown gate. */
+    private int gesture3StrokeDir = 0;
+    private boolean gesture3CanTap = false;
+    /** A 4th/5th contact cancels the 3-finger identity. Ignore the remainder of
+     *  that physical gesture rather than restarting when it falls back to 3. */
+    private boolean gesture3SuppressedUntilUp = false;
     private float gesture3StartX = 0, gesture3StartY = 0;
     private float gesture3LastX = 0, gesture3LastY = 0;
     private float gesture3FireX = 0, gesture3FireY = 0;
@@ -207,6 +218,28 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private static final int TP3_REVERSE_PX = 50;      // mid-stroke reversal re-arm
     private static final long TP3_TAIL_GUARD_MS = 200; // 3->2 finger tail guard
 
+    // On-device validation logging (debug builds only). LimeLog (java.util.logging)
+    // silently drops everything on Android, so gesture decisions go through
+    // android.util.Log under one tag for live logcat inspection while tuning.
+    private static final String TP_LOG_TAG = "ArtemisTP";
+    private boolean recoverTrackpadContextsOnMove = false;
+    private long lastTrackpadRouteLogMs = 0;
+    private static boolean tpLog() {
+        return BuildConfig.DEBUG;
+    }
+    private static String tpGestureName(int gestureType) {
+        switch (gestureType) {
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT: return "SWIPE_LEFT";
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT: return "SWIPE_RIGHT";
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP: return "SWIPE_UP";
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN: return "SWIPE_DOWN";
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP: return "TAP";
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START: return "START";
+            case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END: return "END";
+            default: return "?" + gestureType;
+        }
+    }
+
     // Trackpad pinch-to-zoom state (2 fingers moving apart/together → Ctrl+wheel).
     //
     // Discriminator (the framework's getClassification() always returns NONE on this
@@ -217,26 +250,23 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     // fingers drifts negative and crosses the pinch threshold. New design:
     //   • CONFIRM pinch only when separation change dominates centroid travel AND
     //     the net dot is negative AND both fingers actually moved;
-    //   • LOCK the gesture as scroll once the centroid travels far with separation
-    //     stable — after that it can never become a pinch (macOS/Windows behave the
-    //     same: a gesture's identity is fixed once established).
+    //   • BUFFER ambiguous MOVE frames, then either replay them as scroll or discard
+    //     them when pinch wins. Once remote scroll is emitted, lock that identity.
     private boolean pinchTracking = false;
+    private int pinchPointerId0 = -1, pinchPointerId1 = -1;
+    private float pinchInitialDistance = 0f;
     private float lastPinchDistance = 0f;
     private float pinchLastX0 = 0f, pinchLastY0 = 0f, pinchLastX1 = 0f, pinchLastY1 = 0f;
     private float pinchCumSep = 0f;          // signed cumulative separation change
     private float pinchCumCentroid = 0f;     // unsigned cumulative centroid travel
     private float pinchCumDot = 0f;          // cumulative dot of the two motion vectors
     private float pinchFinger0Travel = 0f, pinchFinger1Travel = 0f;
-    private long pinchLastMoveMs = 0;
+    private long pinchStartMs = 0, pinchLastMoveMs = 0;
     private boolean pinchScrollLocked = false;
     private boolean pinchZoomActive = false;
     private float pinchZoomStartDist = 0f;   // separation when Ctrl went down
     private float pinchZoomSent = 0f;        // wheel units already emitted
-    private static final float PINCH_SEP_CONFIRM_PX = 45f;       // separation change that confirms a pinch
-    private static final float PINCH_SEP_CENTROID_RATIO = 1.25f; // ...must dominate centroid travel by this much
-    private static final float PINCH_FINGER_MIN_TRAVEL = 15f;    // ...and both fingers must be engaged
-    private static final float PINCH_CENTROID_LOCK_PX = 70f;     // centroid travel that locks the gesture as scroll
-    private static final float PINCH_LOCK_SEP_RATIO = 0.35f;     // ...with separation change below this fraction of it
+    private final Queue<MotionEvent> pendingTwoFingerEvents = new ArrayDeque<>();
     private static final long PINCH_PHASE_RESET_MS = 150;        // pause longer than this halves stale accumulators
     private static final float PINCH_ZOOM_GAIN = 1.5f;           // finger separation px → wheel units
     private static final float PINCH_NOTCH_UNITS = 30f;          // scroll granularity (quarter of a wheel notch)
@@ -250,8 +280,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
      *  that window get dropped, so the first few navigation actions are buffered
      *  until it has fully opened. */
     private static final long TASK_VIEW_NAV_ARM_MS = 350;
+    private static final int TASK_VIEW_PENDING_NAV_LIMIT = 4;
     private long taskViewNavArmedUntil = 0;
     private Runnable pendingTaskViewNavRunnable = null;
+    private final Queue<Short> pendingTaskViewNavKeys = new ArrayDeque<>();
 
     // Native-feel Alt+Tab switcher: Alt is held while the user cycles apps (each
     // swipe = one Tab). Release is gesture-driven, not a long timer: Alt closes a
@@ -1524,6 +1556,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // lifted while focus was not on us. Clear the modifier state.
         this.modifierFlags = 0;
 
+        if (!hasFocus) {
+            // Android may stop the MotionEvent stream without destroying this
+            // Activity. Release synthetic modifiers/buttons now, not at onDestroy(),
+            // so the remote host cannot be left with Alt/Ctrl/left-button held.
+            cancelTrackpadInteractionState("window-focus-lost");
+        }
+
         // With Android native pointer capture, capture is lost when focus is lost,
         // so it must be requested again when focus is regained.
         inputCaptureProvider.onWindowFocusChanged(hasFocus);
@@ -1846,17 +1885,19 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         shizukuKeyboardActive = false;
     }
 
-    /** Maps trackpad multi-finger gestures (detected via Shizuku evdev, bypassing
-     *  ColorOS) to Windows shortcuts. */
+    /** Maps trackpad multi-finger gestures detected from framework MotionEvents to
+     *  Windows shortcuts. Shizuku is only used for keyboard capture. */
     private void handleTrackpadGesture(int gestureType) {
+        long now = SystemClock.uptimeMillis();
         // Expire Task View navigation mode after a timeout; any gesture while active
         // keeps it alive so the user can keep swiping to pick a window.
-        if (taskViewMode && System.currentTimeMillis() > taskViewModeUntil) {
+        if (taskViewMode && now > taskViewModeUntil) {
             taskViewMode = false;
             cancelPendingTaskViewNav();
+            if (tpLog()) Log.i(TP_LOG_TAG, "task view timeout");
         }
         if (taskViewMode) {
-            taskViewModeUntil = System.currentTimeMillis() + TASK_VIEW_TIMEOUT_MS;
+            taskViewModeUntil = now + TASK_VIEW_TIMEOUT_MS;
         }
 
         switch (gestureType) {
@@ -1886,10 +1927,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     cancelPendingTaskViewNav();
                     sendKeys(new short[] { (short) KeyboardTranslator.VK_LWIN, (short) KeyboardTranslator.VK_TAB });
                     taskViewMode = true;
-                    taskViewModeUntil = System.currentTimeMillis() + TASK_VIEW_TIMEOUT_MS;
+                    taskViewModeUntil = now + TASK_VIEW_TIMEOUT_MS;
                     // Windows animates Task View open; buffer the first nav keys so
                     // they aren't dropped while it's still settling.
-                    taskViewNavArmedUntil = System.currentTimeMillis() + TASK_VIEW_NAV_ARM_MS;
+                    taskViewNavArmedUntil = now + TASK_VIEW_NAV_ARM_MS;
+                    if (tpLog()) Log.i(TP_LOG_TAG, "task view enter (nav armed " + TASK_VIEW_NAV_ARM_MS + "ms)");
                 }
                 break;
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN:
@@ -1936,25 +1978,49 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     }
 
     /** Sends a single key tap into Task View. While Task View is still animating
-     *  open (arm window), the key is buffered — Windows drops keys sent during the
-     *  animation. Only the most recent nav key is kept (no backlog), so rapid
-     *  swipes behave like key-repeat instead of queuing up stale arrows. */
+     *  open (arm window), keys are held in a small FIFO — Windows drops keys sent
+     *  during the animation, but dropping all except the last also loses deliberate
+     *  multi-swipe/reversal input. The bound prevents an accidental backlog. */
     private void postTaskViewKey(final short vk) {
-        timerHandler.removeCallbacks(pendingTaskViewNavRunnable);
-        long wait = taskViewNavArmedUntil - System.currentTimeMillis();
-        if (wait < 0) {
-            wait = 0;
+        long wait = taskViewNavArmedUntil - SystemClock.uptimeMillis();
+        if (wait <= 0 && pendingTaskViewNavRunnable == null) {
+            sendTaskViewKey(vk);
+            if (tpLog()) Log.i(TP_LOG_TAG, "taskview key vk=" + vk + " immediate");
+            return;
         }
+
+        if (pendingTaskViewNavKeys.size() == TASK_VIEW_PENDING_NAV_LIMIT) {
+            pendingTaskViewNavKeys.poll();
+        }
+        pendingTaskViewNavKeys.offer(vk);
+
+        if (pendingTaskViewNavRunnable != null) {
+            if (tpLog()) Log.i(TP_LOG_TAG, "taskview key vk=" + vk + " queued");
+            return;
+        }
+
         pendingTaskViewNavRunnable = () -> {
-            conn.sendKeyboardInput(vk, KeyboardPacket.KEY_DOWN, (byte) 0, (byte) 0);
-            conn.sendKeyboardInput(vk, KeyboardPacket.KEY_UP, (byte) 0, (byte) 0);
+            pendingTaskViewNavRunnable = null;
+            Short queuedKey;
+            while ((queuedKey = pendingTaskViewNavKeys.poll()) != null) {
+                sendTaskViewKey(queuedKey);
+            }
         };
-        timerHandler.postDelayed(pendingTaskViewNavRunnable, wait);
+        timerHandler.postDelayed(pendingTaskViewNavRunnable, Math.max(0, wait));
+        if (tpLog()) Log.i(TP_LOG_TAG, "taskview key vk=" + vk + " wait=" + Math.max(0, wait) + "ms");
+    }
+
+    private void sendTaskViewKey(short vk) {
+        conn.sendKeyboardInput(vk, KeyboardPacket.KEY_DOWN, (byte) 0, (byte) 0);
+        conn.sendKeyboardInput(vk, KeyboardPacket.KEY_UP, (byte) 0, (byte) 0);
     }
 
     private void cancelPendingTaskViewNav() {
-        timerHandler.removeCallbacks(pendingTaskViewNavRunnable);
+        if (pendingTaskViewNavRunnable != null) {
+            timerHandler.removeCallbacks(pendingTaskViewNavRunnable);
+        }
         pendingTaskViewNavRunnable = null;
+        pendingTaskViewNavKeys.clear();
     }
 
     /** Opens the Alt+Tab switcher (Alt down) and keeps it open while the user cycles;
@@ -1968,6 +2034,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     KeyboardPacket.MODIFIER_ALT, (byte) 0);
             altTabActive = true;
             LimeLog.info("Alt+Tab switcher opened");
+            if (tpLog()) Log.i(TP_LOG_TAG, "alt-tab open");
             timerHandler.postDelayed(altTabSafetyRunnable, ALT_TAB_SAFETY_TIMEOUT_MS);
         }
         timerHandler.removeCallbacks(releaseAltTabRunnable);
@@ -1983,6 +2050,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     (byte) 0, (byte) 0);
             altTabActive = false;
             LimeLog.info("Alt+Tab switcher closed");
+            if (tpLog()) Log.i(TP_LOG_TAG, "alt-tab close");
         }
     }
 
@@ -2037,9 +2105,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         instance = null;
         stopShizukuKeyboardCapture();
-        releaseAltTab();
-        endPinchZoom();
-        com.limelight.binding.input.touch.TrackpadContext.primaryButtonDown = false;
+        cancelTrackpadInteractionState("destroy");
         timerHandler.removeCallbacksAndMessages(null);
 
         if (prefConfig.enableFullExDisplay) handleDisplayRemoved();
@@ -2081,6 +2147,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     @Override
     protected void onPause() {
+        cancelTrackpadInteractionState("pause");
+
         if (isFinishing()) {
             // Stop any further input device notifications before we lose focus (and pointer capture)
             if (controllerHandler != null) {
@@ -2199,6 +2267,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     }
 
     private void setInputGrabState(boolean grab) {
+        if (!grab) {
+            cancelTrackpadInteractionState("input-ungrab");
+        }
+
         // Grab/ungrab the mouse cursor
         if (grab) {
             inputCaptureProvider.enableCapture();
@@ -3144,6 +3216,26 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         int eventSource = event.getSource();
         int deviceSources = event.getDevice() != null ? event.getDevice().getSources() : 0;
+        if (tpLog() && (eventSource == InputDevice.SOURCE_TOUCHPAD
+                || (deviceSources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD)) {
+            int action = event.getActionMasked();
+            long now = event.getEventTime();
+            if (action != MotionEvent.ACTION_MOVE || now - lastTrackpadRouteLogMs >= 1000) {
+                lastTrackpadRouteLogMs = now;
+                Log.i(TP_LOG_TAG, "route action=" + MotionEvent.actionToString(event.getAction())
+                        + " source=0x" + Integer.toHexString(eventSource)
+                        + " tool=" + event.getToolType(0)
+                        + " pc=" + event.getPointerCount()
+                        + " hist=" + event.getHistorySize()
+                        + " xy=" + (int) event.getX() + "," + (int) event.getY()
+                        + " rel=" + inputCaptureProvider.getRelativeAxisX(event)
+                        + "," + inputCaptureProvider.getRelativeAxisY(event)
+                        + " grabbed=" + grabbedInput
+                        + " captureActive=" + inputCaptureProvider.isCapturingActive()
+                        + " viewCapture=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                                && streamContainer.hasPointerCapture()));
+            }
+        }
         if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
             if (controllerHandler.handleMotionEvent(event)) {
                 return true;
@@ -3443,10 +3535,23 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // This case is for fingers
             else {
                 if (eventSource == InputDevice.SOURCE_TOUCHPAD) {
+                    if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                        recoverTrackpadContextsOnMove = false;
+                        // A fresh contact is an intentional brake for any kinetic
+                        // motion, including momentum owned by the second context.
+                        // Keep pending tap state intact so double-tap still works.
+                        stopTrackpadMomentum();
+                    }
+                    if (recoverTrackpadContextsFromMove(event)) {
+                        return true;
+                    }
                     if (handleTrackpadGestures(event)) {
                         return true;
                     }
                     if (handleTrackpadPinch(event)) {
+                        return true;
+                    }
+                    if (handleCapturedTrackpadPointerMove(event)) {
                         return true;
                     }
                     return handleTouchInput(event, trackpadContextMap, false);
@@ -3527,18 +3632,52 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // lift, but never count it as a tap. Swallow only multi-finger cancels so
         // single-finger cancels still reach the touch contexts.
         if (action == MotionEvent.ACTION_CANCEL) {
-            if (gesture3PrevDown) {
-                gesture3PrevDown = false;
-                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
+            boolean consumed = gesture3PrevDown || gesture3SuppressedUntilUp || pc >= 3;
+            finishThreeFingerStroke(now, false);
+            gesture3SuppressedUntilUp = false;
+            if (consumed) {
                 resetTrackpadContexts();
                 gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+                if (tpLog()) Log.i(TP_LOG_TAG, "CANCEL: stroke torn down");
             }
-            gesture3Active = false;
-            return pc >= 3;
+            return consumed;
         }
 
-        if (pc >= 3) {
-            // Update centroid (use the first 3 pointers; extra fingers are ignored).
+        // Be tolerant of an anomalous new DOWN without the previous UP/CANCEL, as
+        // required by MotionEvent's delivery contract.
+        if (action == MotionEvent.ACTION_DOWN) {
+            finishThreeFingerStroke(now, false);
+            gesture3SuppressedUntilUp = false;
+        }
+
+        // Gesture identity is tied to its finger count. A fourth contact cancels the
+        // three-finger stroke; don't silently use an arbitrary first-three subset.
+        if (pc > 3) {
+            if (!gesture3SuppressedUntilUp) {
+                finishThreeFingerStroke(now, false);
+                gesture3SuppressedUntilUp = true;
+                resetTrackpadContexts();
+                gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+                if (tpLog()) Log.i(TP_LOG_TAG, "stroke suppressed: pointer count=" + pc);
+            }
+            return true;
+        }
+
+        if (gesture3SuppressedUntilUp) {
+            if (action == MotionEvent.ACTION_UP) {
+                gesture3SuppressedUntilUp = false;
+                gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+                if (tpLog()) Log.i(TP_LOG_TAG, "suppressed stroke fully lifted");
+            }
+            return true;
+        }
+
+        // ACTION_POINTER_UP still contains the pointer being lifted. A 3-pointer UP
+        // therefore ends the 3-finger identity even though getPointerCount() is 3.
+        boolean threeFingerPointerUp = pc == 3 && action == MotionEvent.ACTION_POINTER_UP;
+        if (pc == 3 && !threeFingerPointerUp) {
+            // A centroid is invariant to pointer index reordering as long as the
+            // membership remains the same (finger-count changes are handled above).
             float cx = (event.getX(0) + event.getX(1) + event.getX(2)) / 3f;
             float cy = (event.getY(0) + event.getY(1) + event.getY(2)) / 3f;
 
@@ -3552,9 +3691,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 gesture3StartX = gesture3LastX = cx;
                 gesture3StartY = gesture3LastY = cy;
                 gesture3CumDX = gesture3CumDY = 0;
+                gesture3StrokeDir = 0;
+                gesture3CanTap = true;
                 // The stroke is now 3-finger; whatever 2-finger identity the pinch
                 // detector was building is void.
                 resetPinchState();
+                if (tpLog()) Log.i(TP_LOG_TAG, "stroke start");
             }
 
             if (action == MotionEvent.ACTION_MOVE) {
@@ -3586,35 +3728,48 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     }
 
                     if (dir != 0) {
+                        // These coordinates and direction belong to this stroke even
+                        // when the cross-stroke cooldown suppresses its host action.
+                        // Keeping them separate prevents stale prior-stroke positions
+                        // from causing a false reversal after a different landing spot.
+                        gesture3StrokeDir = dir;
+                        gesture3FireX = cx;
+                        gesture3FireY = cy;
+                        gesture3CanTap = false;
+
                         // Same-direction repeat inside the cooldown is swallowed (the
                         // previous fire is still settling); reversing direction fires
                         // immediately — "change your mind" while cycling must not wait.
                         if (dir != gesture3LastDir || now - gesture3LastFireMs > TP3_COOLDOWN_MS) {
                             gesture3LastDir = dir;
                             gesture3LastFireMs = now;
-                            gesture3FireX = cx;
-                            gesture3FireY = cy;
                             handleTrackpadGesture(dir);
+                            if (tpLog()) Log.i(TP_LOG_TAG, "fire " + tpGestureName(dir)
+                                    + " dx=" + (int) gesture3CumDX + " dy=" + (int) gesture3CumDY
+                                    + " t=" + elapsed + "ms" + (fast ? " fast" : " slow"));
+                        } else if (tpLog()) {
+                            Log.i(TP_LOG_TAG, "swallow " + tpGestureName(dir)
+                                    + " (cooldown " + (now - gesture3LastFireMs) + "ms)");
                         }
                         // Either way this stroke is consumed until the fingers lift
                         // (or reverse — see below), so a long swipe can't re-fire.
                         gesture3Active = false;
                     }
-                } else if (gesture3LastDir != 0) {
+                } else if (gesture3StrokeDir != 0) {
                     // A swipe already fired in this stroke. Watch for a direction
                     // reversal to re-arm: R-then-L cycles the switcher back without
                     // lifting, and the reversed swipe bypasses the cooldown at fire.
                     boolean reversed = false;
-                    if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT
+                    if (gesture3StrokeDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_LEFT
                             && cx - gesture3FireX > TP3_REVERSE_PX) {
                         reversed = true;
-                    } else if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT
+                    } else if (gesture3StrokeDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_RIGHT
                             && gesture3FireX - cx > TP3_REVERSE_PX) {
                         reversed = true;
-                    } else if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP
+                    } else if (gesture3StrokeDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_UP
                             && cy - gesture3FireY > TP3_REVERSE_PX) {
                         reversed = true;
-                    } else if (gesture3LastDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN
+                    } else if (gesture3StrokeDir == com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_SWIPE_DOWN
                             && gesture3FireY - cy > TP3_REVERSE_PX) {
                         reversed = true;
                     }
@@ -3624,6 +3779,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                         gesture3StartX = gesture3LastX = cx;
                         gesture3StartY = gesture3LastY = cy;
                         gesture3CumDX = gesture3CumDY = 0;
+                        if (tpLog()) Log.i(TP_LOG_TAG, "reversal re-arm");
                     }
                 }
             }
@@ -3632,21 +3788,38 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         // Fewer than 3 fingers.
         if (gesture3PrevDown) {
-            gesture3PrevDown = false;
-            handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
-            if (gesture3Active) {
-                long dur = now - gesture3StartMs;
-                float move = Math.abs(gesture3LastX - gesture3StartX)
-                        + Math.abs(gesture3LastY - gesture3StartY);
-                if (dur < TP3_TAP_MAX_DURATION_MS && move < TP3_TAP_MAX_MOVE) {
-                    handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP);
-                }
-                gesture3Active = false;
-            }
-            resetTrackpadContexts();
-            gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+            finishThreeFingerStroke(now, true);
+            return threeFingerPointerUp;
         }
         return false;
+    }
+
+    private void finishThreeFingerStroke(long now, boolean allowTap) {
+        if (!gesture3PrevDown) {
+            gesture3Active = false;
+            gesture3CanTap = false;
+            gesture3StrokeDir = 0;
+            return;
+        }
+
+        gesture3PrevDown = false;
+        handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END);
+        if (allowTap && gesture3Active && gesture3CanTap) {
+            long duration = now - gesture3StartMs;
+            float move = Math.abs(gesture3LastX - gesture3StartX)
+                    + Math.abs(gesture3LastY - gesture3StartY);
+            if (duration < TP3_TAP_MAX_DURATION_MS && move < TP3_TAP_MAX_MOVE) {
+                handleTrackpadGesture(com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_TAP);
+                if (tpLog()) Log.i(TP_LOG_TAG, "tap (dur=" + duration + "ms move=" + (int) move + "px)");
+            }
+        }
+
+        gesture3Active = false;
+        gesture3CanTap = false;
+        gesture3StrokeDir = 0;
+        resetTrackpadContexts();
+        gesture3TailGuardUntil = now + TP3_TAIL_GUARD_MS;
+        if (tpLog()) Log.i(TP_LOG_TAG, "stroke end (tail guard " + TP3_TAIL_GUARD_MS + "ms)");
     }
 
     /** The TrackpadContext slots froze while the 3-finger stroke consumed everything;
@@ -3655,9 +3828,151 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
      *  gesture's first finger DOWN re-initialises them. */
     private void resetTrackpadContexts() {
         for (TouchContext tc : trackpadContextMap) {
-            tc.cancelTouch();
-            tc.setPointerCount(0);
+            if (tc != null) {
+                tc.cancelTouch();
+                tc.setPointerCount(0);
+            }
         }
+    }
+
+    private void stopTrackpadMomentum() {
+        for (TouchContext tc : trackpadContextMap) {
+            if (tc instanceof TrackpadContext) {
+                ((TrackpadContext) tc).stopFling();
+            }
+        }
+    }
+
+    private void cancelTrackpadInteractionState(String reason) {
+        int hardwareButtonsDown = lastButtonState;
+        boolean primaryWasDown = (hardwareButtonsDown & MotionEvent.BUTTON_PRIMARY) != 0
+                || TrackpadContext.primaryButtonDown;
+
+        releaseAltTab();
+        resetPinchState();
+        cancelPendingTaskViewNav();
+        taskViewMode = false;
+        taskViewModeUntil = 0;
+        taskViewNavArmedUntil = 0;
+
+        gesture3Active = false;
+        gesture3PrevDown = false;
+        gesture3CanTap = false;
+        gesture3StrokeDir = 0;
+        gesture3SuppressedUntilUp = false;
+        gesture3LastDir = 0;
+        gesture3LastFireMs = 0;
+        gesture3TailGuardUntil = 0;
+
+        resetTrackpadContexts();
+        if (conn != null) {
+            // Duplicate UP is harmless and guarantees recovery even if the context
+            // that originally sent DOWN already lost its bookkeeping during focus
+            // or pointer-capture changes.
+            if (primaryWasDown) {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+            }
+            if ((hardwareButtonsDown & MotionEvent.BUTTON_SECONDARY) != 0) {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
+            }
+            if ((hardwareButtonsDown & MotionEvent.BUTTON_TERTIARY) != 0) {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_MIDDLE);
+            }
+            if ((hardwareButtonsDown & MotionEvent.BUTTON_BACK) != 0) {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_X1);
+            }
+            if ((hardwareButtonsDown & MotionEvent.BUTTON_FORWARD) != 0) {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_X2);
+            }
+        }
+        TrackpadContext.primaryButtonDown = false;
+        lastButtonState = 0;
+        recoverTrackpadContextsOnMove = true;
+
+        if (tpLog()) Log.i(TP_LOG_TAG, "interaction state cancelled reason=" + reason
+                + " buttons=0x" + Integer.toHexString(hardwareButtonsDown)
+                + " captureActive=" + inputCaptureProvider.isCapturingActive());
+    }
+
+    /** Pointer capture can be restored while contacts are already down. Some Android
+     *  builds then resume with MOVE instead of a fresh DOWN, leaving contexts that
+     *  were deliberately cancelled on focus loss unable to move the remote cursor.
+     *  Seed the active contacts once and consume that first MOVE; subsequent samples
+     *  use normal deltas. Gesture-specific cancellation does not arm this recovery,
+     *  so 3->2 finger tails remain isolated. */
+    private boolean recoverTrackpadContextsFromMove(MotionEvent event) {
+        if (!recoverTrackpadContextsOnMove
+                || event.getActionMasked() != MotionEvent.ACTION_MOVE
+                || event.getPointerCount() < 1
+                || event.getPointerCount() > trackpadContextMap.length
+                || event.getEventTime() < gesture3TailGuardUntil) {
+            return false;
+        }
+
+        int pointerCount = event.getPointerCount();
+        for (TouchContext context : trackpadContextMap) {
+            context.setPointerCount(pointerCount);
+        }
+        for (int i = 0; i < pointerCount; i++) {
+            trackpadContextMap[i].touchDownEvent((int) event.getX(i), (int) event.getY(i),
+                    event.getEventTime(), true);
+        }
+        recoverTrackpadContextsOnMove = false;
+        if (tpLog()) Log.i(TP_LOG_TAG, "recovered contexts from MOVE pc=" + pointerCount);
+        return true;
+    }
+
+    /** Under native pointer capture Android reports one-finger touchpad movement on
+     *  AXIS_RELATIVE_X/Y. The event still has TOOL_TYPE_FINGER, so routing solely by
+     *  tool type incorrectly sends it through absolute getX()/getY() coordinates and
+     *  can produce no remote cursor motion on ColorOS. Keep DOWN/UP in the normal
+     *  TrackpadContext path for taps and drags, but feed captured MOVE deltas into the
+     *  same context state machine. */
+    private boolean handleCapturedTrackpadPointerMove(MotionEvent event) {
+        if (event.getActionMasked() != MotionEvent.ACTION_MOVE
+                || event.getPointerCount() != 1
+                || event.getEventTime() < gesture3TailGuardUntil
+                || trackpadContextMap[0].isCancelled()
+                || !(trackpadContextMap[0] instanceof TrackpadContext)
+                || !inputCaptureProvider.eventHasRelativeMouseAxes(event)) {
+            return false;
+        }
+
+        TrackpadContext context = (TrackpadContext) trackpadContextMap[0];
+        boolean handled = false;
+        if (inputCaptureProvider.supportsRelativeAxisHistory()) {
+            // Android may batch several touchpad reports into one MotionEvent. Feeding
+            // only their sum preserves distance but flattens the timestamps used by
+            // pointer acceleration and makes fine motion feel chunky. Replay each
+            // captured sample at its original event time before the current sample.
+            for (int i = 0; i < event.getHistorySize(); i++) {
+                float historicalX = inputCaptureProvider.getHistoricalRelativeAxisX(event, 0, i);
+                float historicalY = inputCaptureProvider.getHistoricalRelativeAxisY(event, 0, i);
+                if (historicalX != 0f || historicalY != 0f) {
+                    context.touchMoveRelativeEvent(historicalX, historicalY,
+                            event.getHistoricalEventTime(i));
+                    handled = true;
+                }
+            }
+
+            float currentX = inputCaptureProvider.getCurrentRelativeAxisX(event, 0);
+            float currentY = inputCaptureProvider.getCurrentRelativeAxisY(event, 0);
+            if (currentX != 0f || currentY != 0f) {
+                context.touchMoveRelativeEvent(currentX, currentY, event.getEventTime());
+                handled = true;
+            }
+        } else {
+            float deltaX = inputCaptureProvider.getRelativeAxisX(event);
+            float deltaY = inputCaptureProvider.getRelativeAxisY(event);
+            if (deltaX != 0f || deltaY != 0f) {
+                context.touchMoveRelativeEvent(deltaX, deltaY, event.getEventTime());
+                handled = true;
+            }
+        }
+
+        // A device may advertise captured relative axes but omit them on a
+        // particular frame. Preserve the absolute-coordinate fallback.
+        return handled;
     }
 
     /** Detect a two-finger pinch on the trackpad and translate it to Ctrl+wheel zoom.
@@ -3667,28 +3982,65 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
      *  OPPO trackpad, so we classify ourselves): a scroll moves both fingers together
      *  — the centroid travels while the separation stays ~constant and the motion
      *  vectors' dot product is positive; a pinch changes the separation — the
-     *  centroid barely moves and the dot is negative. The gesture's identity is
-     *  fixed once established (confirm-and-lock): once the centroid has travelled
-     *  far with stable separation, the gesture is locked as scroll and can never
-     *  become a pinch. That kills the old false triggers (a slow scroll with
-     *  "walking" fingers drifting negative, or a "gather" at the start of a
-     *  scroll).
+     *  centroid barely moves and the dot is negative. Ambiguous MOVE frames are held
+     *  briefly. They are replayed with their original timestamps when scroll wins,
+     *  or discarded when pinch wins, so the remote host never sees "scroll first,
+     *  then zoom". Once scroll output begins, its identity remains locked.
      */
     private boolean handleTrackpadPinch(MotionEvent event) {
         int action = event.getActionMasked();
         int pc = event.getPointerCount();
         long now = event.getEventTime();
 
-        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP
-                || action == MotionEvent.ACTION_CANCEL) {
+        if (action == MotionEvent.ACTION_CANCEL) {
+            boolean wasZooming = pinchZoomActive;
+            resetPinchState();
+            if (wasZooming) {
+                resetTrackpadContexts();
+            }
+            return wasZooming;
+        }
+
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            if (pinchZoomActive) {
+                resetPinchState();
+                resetTrackpadContexts();
+                return true;
+            }
+
+            if (pinchTracking && !pinchScrollLocked && !pendingTwoFingerEvents.isEmpty()) {
+                TrackpadGestureClassifier.TwoFingerGesture decision =
+                        TrackpadGestureClassifier.classifyTwoFingerGestureAtEnd(
+                                pinchInitialDistance, pinchCumSep, pinchCumCentroid, pinchCumDot,
+                                pinchFinger0Travel, pinchFinger1Travel,
+                                now - pinchStartMs, pendingTwoFingerEvents.size());
+                if (decision == TrackpadGestureClassifier.TwoFingerGesture.SCROLL) {
+                    replayPendingTwoFingerEvents();
+                } else {
+                    discardPendingTwoFingerEvents();
+                }
+
+                boolean suppressAbortedPinch =
+                        decision == TrackpadGestureClassifier.TwoFingerGesture.PINCH;
+                resetPinchState();
+                if (suppressAbortedPinch) {
+                    // Do not let an under-threshold pinch become a right-click when
+                    // the normal two-finger context receives the lift.
+                    resetTrackpadContexts();
+                    if (tpLog()) Log.i(TP_LOG_TAG, "short pinch suppressed on lift");
+                }
+                return suppressAbortedPinch;
+            }
+
             resetPinchState();
             return false;
         }
 
-        if (pc != 2 || action != MotionEvent.ACTION_MOVE) {
-            if (pc < 2) {
-                resetPinchState();
-            }
+        if (pc != 2) {
+            resetPinchState();
+            return false;
+        }
+        if (action != MotionEvent.ACTION_MOVE) {
             return false;
         }
 
@@ -3697,48 +4049,58 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return false;
         }
 
-        float x0 = event.getX(0), y0 = event.getY(0);
-        float x1 = event.getX(1), y1 = event.getY(1);
-        float dist = (float) Math.sqrt((x0 - x1) * (x0 - x1) + (y0 - y1) * (y0 - y1));
+        int pointerIndex0 = 0;
+        int pointerIndex1 = 1;
+        if (pinchTracking) {
+            pointerIndex0 = event.findPointerIndex(pinchPointerId0);
+            pointerIndex1 = event.findPointerIndex(pinchPointerId1);
+            if (pointerIndex0 < 0 || pointerIndex1 < 0) {
+                // Pointer indexes are explicitly unstable across MotionEvents. Never
+                // compare a replacement finger with another finger's last position;
+                // reseed the recognizer with the current pair instead.
+                resetPinchState();
+                pointerIndex0 = 0;
+                pointerIndex1 = 1;
+                if (tpLog()) Log.i(TP_LOG_TAG, "pinch reseed after pointer-id change");
+            }
+        }
 
+        float x0 = event.getX(pointerIndex0), y0 = event.getY(pointerIndex0);
+        float x1 = event.getX(pointerIndex1), y1 = event.getY(pointerIndex1);
+        float dist = calculateDistance(x0, y0, x1, y1);
+
+        boolean seededFromOldestHistory = false;
         if (!pinchTracking) {
-            // First move frame: seed finger positions and separation baseline.
+            // Seed from the oldest batched sample when available. Android gesture
+            // axes and pointer coordinates are per-sample; skipping history makes
+            // classification depend on UI delivery/batching frequency.
             pinchTracking = true;
-            pinchLastX0 = x0; pinchLastY0 = y0;
-            pinchLastX1 = x1; pinchLastY1 = y1;
-            lastPinchDistance = dist;
-            pinchCumSep = pinchCumCentroid = pinchCumDot = 0f;
-            pinchFinger0Travel = pinchFinger1Travel = 0f;
-            pinchLastMoveMs = now;
-            return false;
+            pinchPointerId0 = event.getPointerId(pointerIndex0);
+            pinchPointerId1 = event.getPointerId(pointerIndex1);
+            if (event.getHistorySize() > 0) {
+                float historyX0 = event.getHistoricalX(pointerIndex0, 0);
+                float historyY0 = event.getHistoricalY(pointerIndex0, 0);
+                float historyX1 = event.getHistoricalX(pointerIndex1, 0);
+                float historyY1 = event.getHistoricalY(pointerIndex1, 0);
+                seedPinchSample(historyX0, historyY0, historyX1, historyY1,
+                        event.getHistoricalEventTime(0));
+                seededFromOldestHistory = true;
+            } else {
+                seedPinchSample(x0, y0, x1, y1, now);
+            }
+            if (tpLog()) Log.i(TP_LOG_TAG, "pinch tracking start dist=" + (int) dist);
         }
 
-        // Stale-accumulator decay: if the fingers rested for a while, the old bias
-        // (e.g. a small gather before a scroll) should not decide this new phase.
-        if (now - pinchLastMoveMs > PINCH_PHASE_RESET_MS) {
-            pinchCumSep *= 0.5f;
-            pinchCumCentroid *= 0.5f;
-            pinchCumDot *= 0.5f;
-            pinchFinger0Travel *= 0.5f;
-            pinchFinger1Travel *= 0.5f;
+        int historyStart = seededFromOldestHistory ? 1 : 0;
+        for (int i = historyStart; i < event.getHistorySize(); i++) {
+            accumulatePinchSample(
+                    event.getHistoricalX(pointerIndex0, i),
+                    event.getHistoricalY(pointerIndex0, i),
+                    event.getHistoricalX(pointerIndex1, i),
+                    event.getHistoricalY(pointerIndex1, i),
+                    event.getHistoricalEventTime(i));
         }
-        pinchLastMoveMs = now;
-
-        float dx0 = x0 - pinchLastX0, dy0 = y0 - pinchLastY0;
-        float dx1 = x1 - pinchLastX1, dy1 = y1 - pinchLastY1;
-        pinchLastX0 = x0; pinchLastY0 = y0;
-        pinchLastX1 = x1; pinchLastY1 = y1;
-
-        float dDist = dist - lastPinchDistance;
-        lastPinchDistance = dist;
-
-        pinchCumSep += dDist;
-        float centroidDx = (dx0 + dx1) / 2f;
-        float centroidDy = (dy0 + dy1) / 2f;
-        pinchCumCentroid += (float) Math.sqrt(centroidDx * centroidDx + centroidDy * centroidDy);
-        pinchCumDot += dx0 * dx1 + dy0 * dy1;
-        pinchFinger0Travel += (float) Math.sqrt(dx0 * dx0 + dy0 * dy0);
-        pinchFinger1Travel += (float) Math.sqrt(dx1 * dx1 + dy1 * dy1);
+        accumulatePinchSample(x0, y0, x1, y1, now);
 
         if (pinchZoomActive) {
             // Position-based zoom: track the separation relative to when Ctrl went
@@ -3754,6 +4116,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             if (notches != 0) {
                 conn.sendMouseHighResScroll((short) (notches * PINCH_NOTCH_UNITS));
                 pinchZoomSent += notches * PINCH_NOTCH_UNITS;
+                if (tpLog()) Log.i(TP_LOG_TAG, "zoom " + notches + " notches (dist=" + (int) dist + ")");
             }
             return true;
         }
@@ -3762,42 +4125,159 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return false; // this gesture is a scroll; let TrackpadContext handle it
         }
 
-        // Scroll lock: the centroid travelled far while the separation stayed put —
-        // unmistakably a scroll, and it must stay one for the rest of the gesture.
-        if (pinchCumCentroid > PINCH_CENTROID_LOCK_PX
-                && Math.abs(pinchCumSep) < pinchCumCentroid * PINCH_LOCK_SEP_RATIO) {
-            pinchScrollLocked = true;
-            return false;
+        bufferPendingTwoFingerEvent(event);
+
+        int frameworkClassification = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                ? event.getClassification() : MotionEvent.CLASSIFICATION_NONE;
+        TrackpadGestureClassifier.TwoFingerGesture decision;
+        if (frameworkClassification == MotionEvent.CLASSIFICATION_PINCH) {
+            decision = TrackpadGestureClassifier.TwoFingerGesture.PINCH;
+        } else if (frameworkClassification == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE) {
+            decision = TrackpadGestureClassifier.TwoFingerGesture.SCROLL;
+        } else if (frameworkClassification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE
+                && now - pinchStartMs < 300
+                && pendingTwoFingerEvents.size()
+                < TrackpadGestureClassifier.MAX_PENDING_EVENT_COUNT) {
+            // Android explicitly asks consumers to inhibit scroll while this
+            // classification is unresolved. The bounded fallback below prevents a
+            // broken driver from holding the gesture forever.
+            decision = TrackpadGestureClassifier.TwoFingerGesture.UNDECIDED;
+        } else {
+            decision = TrackpadGestureClassifier.classifyTwoFingerGesture(
+                    pinchInitialDistance, pinchCumSep, pinchCumCentroid, pinchCumDot,
+                    pinchFinger0Travel, pinchFinger1Travel,
+                    now - pinchStartMs, pendingTwoFingerEvents.size());
         }
 
-        // Pinch confirmation: separation change dominates centroid travel, the net
-        // dot is negative (fingers moving in opposing directions) and both fingers
-        // are actually engaged — a resting finger kills it, because that is a scroll
-        // catching up (one finger moving, the other still), not a pinch.
-        if (Math.abs(pinchCumSep) > PINCH_SEP_CONFIRM_PX
-                && Math.abs(pinchCumSep) > pinchCumCentroid * PINCH_SEP_CENTROID_RATIO
-                && pinchCumDot < 0f
-                && pinchFinger0Travel > PINCH_FINGER_MIN_TRAVEL
-                && pinchFinger1Travel > PINCH_FINGER_MIN_TRAVEL) {
+        if (decision == TrackpadGestureClassifier.TwoFingerGesture.SCROLL) {
+            int bufferedEventCount = pendingTwoFingerEvents.size();
+            pinchScrollLocked = true;
+            replayPendingTwoFingerEvents();
+            if (tpLog()) Log.i(TP_LOG_TAG, "scroll confirm (buffered=" + bufferedEventCount
+                    + " t=" + (now - pinchStartMs) + "ms centroid=" + (int) pinchCumCentroid
+                    + " sep=" + (int) pinchCumSep + ")");
+            return true;
+        }
+
+        if (decision == TrackpadGestureClassifier.TwoFingerGesture.PINCH) {
+            int bufferedEventCount = pendingTwoFingerEvents.size();
+            discardPendingTwoFingerEvents();
+            // The contexts saw POINTER_DOWN but no ambiguous MOVE frames. Cancel
+            // them now so the later lift cannot synthesize a right click.
+            resetTrackpadContexts();
             conn.sendKeyboardInput((short) KeyboardTranslator.VK_LCONTROL, KeyboardPacket.KEY_DOWN,
                     KeyboardPacket.MODIFIER_CTRL, (byte) 0);
             pinchZoomActive = true;
             pinchZoomStartDist = dist;
             pinchZoomSent = 0f;
             LimeLog.info("Pinch zoom started");
+            if (tpLog()) Log.i(TP_LOG_TAG, "pinch confirm (buffered=" + bufferedEventCount
+                    + " t=" + (now - pinchStartMs) + "ms sep=" + (int) pinchCumSep
+                    + " centroid=" + (int) pinchCumCentroid + " dot=" + (int) pinchCumDot
+                    + " t0=" + (int) pinchFinger0Travel + " t1=" + (int) pinchFinger1Travel + ")");
             return true;
         }
 
-        return false; // undetermined — let the normal 2-finger path handle this frame
+        return true; // ambiguous: withhold irreversible host output until classified
+    }
+
+    private static float calculateDistance(float x0, float y0, float x1, float y1) {
+        float dx = x0 - x1;
+        float dy = y0 - y1;
+        return (float) Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private void seedPinchSample(float x0, float y0, float x1, float y1, long sampleTime) {
+        pinchLastX0 = x0;
+        pinchLastY0 = y0;
+        pinchLastX1 = x1;
+        pinchLastY1 = y1;
+        pinchInitialDistance = lastPinchDistance = calculateDistance(x0, y0, x1, y1);
+        pinchCumSep = pinchCumCentroid = pinchCumDot = 0f;
+        pinchFinger0Travel = pinchFinger1Travel = 0f;
+        pinchStartMs = pinchLastMoveMs = sampleTime;
+    }
+
+    private void accumulatePinchSample(float x0, float y0, float x1, float y1,
+            long sampleTime) {
+        if (sampleTime < pinchLastMoveMs) {
+            return;
+        }
+
+        if (!pinchZoomActive && !pinchScrollLocked
+                && sampleTime - pinchLastMoveMs > PINCH_PHASE_RESET_MS) {
+            // A pause can begin a new gesture phase without all contacts lifting.
+            // Drop old ambiguous output instead of releasing it as a delayed burst.
+            discardPendingTwoFingerEvents();
+            seedPinchSample(x0, y0, x1, y1, sampleTime);
+            if (tpLog()) Log.i(TP_LOG_TAG, "two-finger phase reset after pause");
+            return;
+        }
+
+        float dx0 = x0 - pinchLastX0;
+        float dy0 = y0 - pinchLastY0;
+        float dx1 = x1 - pinchLastX1;
+        float dy1 = y1 - pinchLastY1;
+        pinchLastX0 = x0;
+        pinchLastY0 = y0;
+        pinchLastX1 = x1;
+        pinchLastY1 = y1;
+
+        float distance = calculateDistance(x0, y0, x1, y1);
+        pinchCumSep += distance - lastPinchDistance;
+        lastPinchDistance = distance;
+
+        float centroidDx = (dx0 + dx1) / 2f;
+        float centroidDy = (dy0 + dy1) / 2f;
+        pinchCumCentroid += calculateDistance(0f, 0f, centroidDx, centroidDy);
+        pinchCumDot += dx0 * dx1 + dy0 * dy1;
+        pinchFinger0Travel += calculateDistance(0f, 0f, dx0, dy0);
+        pinchFinger1Travel += calculateDistance(0f, 0f, dx1, dy1);
+        pinchLastMoveMs = sampleTime;
+    }
+
+    private void bufferPendingTwoFingerEvent(MotionEvent event) {
+        if (pendingTwoFingerEvents.size()
+                == TrackpadGestureClassifier.MAX_PENDING_EVENT_COUNT) {
+            // Retain a bounded rolling window. If meaningful movement appears later,
+            // the first retained coordinate still carries the net displacement from
+            // TrackpadContext's original POINTER_DOWN position.
+            MotionEvent oldestEvent = pendingTwoFingerEvents.poll();
+            if (oldestEvent != null) {
+                oldestEvent.recycle();
+            }
+        }
+        pendingTwoFingerEvents.offer(MotionEvent.obtain(event));
+    }
+
+    private void replayPendingTwoFingerEvents() {
+        MotionEvent pendingEvent;
+        while ((pendingEvent = pendingTwoFingerEvents.poll()) != null) {
+            try {
+                handleTouchInput(pendingEvent, trackpadContextMap, false);
+            } finally {
+                pendingEvent.recycle();
+            }
+        }
+    }
+
+    private void discardPendingTwoFingerEvents() {
+        MotionEvent pendingEvent;
+        while ((pendingEvent = pendingTwoFingerEvents.poll()) != null) {
+            pendingEvent.recycle();
+        }
     }
 
     private void resetPinchState() {
         endPinchZoom();
+        discardPendingTwoFingerEvents();
         pinchTracking = false;
         pinchScrollLocked = false;
-        lastPinchDistance = 0f;
+        pinchPointerId0 = pinchPointerId1 = -1;
+        pinchInitialDistance = lastPinchDistance = 0f;
         pinchCumSep = pinchCumCentroid = pinchCumDot = 0f;
         pinchFinger0Travel = pinchFinger1Travel = 0f;
+        pinchStartMs = pinchLastMoveMs = 0;
         pinchLastX0 = pinchLastY0 = pinchLastX1 = pinchLastY1 = 0f;
     }
 
@@ -3807,6 +4287,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     (byte) 0, (byte) 0);
             pinchZoomActive = false;
             LimeLog.info("Pinch zoom ended");
+            if (tpLog()) Log.i(TP_LOG_TAG, "pinch end");
         }
     }
 
@@ -3944,6 +4425,24 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 }
                 else {
                     context.touchUpEvent(eventX, eventY, event.getEventTime());
+                }
+
+                if (!isTouchScreen
+                        && inputContextMap == trackpadContextMap
+                        && eventAction == MotionEvent.ACTION_POINTER_UP
+                        && actionIndex == 0
+                        && pointerCount == 2
+                        && inputContextMap[1] instanceof TrackpadContext) {
+                    // TrackpadContext index 1 owns two-finger scroll velocity. If
+                    // pointer index 0 lifts first, Android directs this UP to context
+                    // 0 and the scroll owner would otherwise never start momentum.
+                    // Do not call its full touchUpEvent(): context 0's promotion path
+                    // below already owns two-finger tap/right-click resolution.
+                    boolean momentumStarted = ((TrackpadContext) inputContextMap[1])
+                            .finishScrollGesture(event.getEventTime());
+                    if (momentumStarted && tpLog()) {
+                        Log.i(TP_LOG_TAG, "scroll momentum handoff after pointer 0 lift");
+                    }
                 }
 
                 for (TouchContext touchContext : inputContextMap) {

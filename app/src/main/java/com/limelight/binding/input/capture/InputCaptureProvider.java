@@ -53,5 +53,27 @@ public abstract class InputCaptureProvider {
         return getRelativeAxisY(event, 0);
     }
 
+    /** Whether this provider can expose captured relative-axis history sample by
+     *  sample. Providers that return false continue using the aggregate getters. */
+    public boolean supportsRelativeAxisHistory() {
+        return false;
+    }
+
+    public float getCurrentRelativeAxisX(MotionEvent event, int pointerIndex) {
+        return getRelativeAxisX(event, pointerIndex);
+    }
+
+    public float getCurrentRelativeAxisY(MotionEvent event, int pointerIndex) {
+        return getRelativeAxisY(event, pointerIndex);
+    }
+
+    public float getHistoricalRelativeAxisX(MotionEvent event, int pointerIndex, int historyIndex) {
+        return 0;
+    }
+
+    public float getHistoricalRelativeAxisY(MotionEvent event, int pointerIndex, int historyIndex) {
+        return 0;
+    }
+
     public void onWindowFocusChanged(boolean focusActive) {}
 }

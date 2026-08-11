@@ -121,24 +121,53 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
 
     @Override
     public float getRelativeAxisX(MotionEvent event, int pointerIndex) {
-        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-                MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
-        float x = event.getAxisValue(axis, pointerIndex);
+        float x = getCurrentRelativeAxisX(event, pointerIndex);
         for (int i = 0; i < event.getHistorySize(); i++) {
-            x += event.getHistoricalAxisValue(axis, pointerIndex, i);
+            x += getHistoricalRelativeAxisX(event, pointerIndex, i);
         }
         return x;
     }
 
     @Override
     public float getRelativeAxisY(MotionEvent event, int pointerIndex) {
-        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-                MotionEvent.AXIS_Y : MotionEvent.AXIS_RELATIVE_Y;
-        float y = event.getAxisValue(axis, pointerIndex);
+        float y = getCurrentRelativeAxisY(event, pointerIndex);
         for (int i = 0; i < event.getHistorySize(); i++) {
-            y += event.getHistoricalAxisValue(axis, pointerIndex, i);
+            y += getHistoricalRelativeAxisY(event, pointerIndex, i);
         }
         return y;
+    }
+
+    @Override
+    public boolean supportsRelativeAxisHistory() {
+        return true;
+    }
+
+    @Override
+    public float getCurrentRelativeAxisX(MotionEvent event, int pointerIndex) {
+        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
+                MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
+        return event.getAxisValue(axis, pointerIndex);
+    }
+
+    @Override
+    public float getCurrentRelativeAxisY(MotionEvent event, int pointerIndex) {
+        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
+                MotionEvent.AXIS_Y : MotionEvent.AXIS_RELATIVE_Y;
+        return event.getAxisValue(axis, pointerIndex);
+    }
+
+    @Override
+    public float getHistoricalRelativeAxisX(MotionEvent event, int pointerIndex, int historyIndex) {
+        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
+                MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
+        return event.getHistoricalAxisValue(axis, pointerIndex, historyIndex);
+    }
+
+    @Override
+    public float getHistoricalRelativeAxisY(MotionEvent event, int pointerIndex, int historyIndex) {
+        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
+                MotionEvent.AXIS_Y : MotionEvent.AXIS_RELATIVE_Y;
+        return event.getHistoricalAxisValue(axis, pointerIndex, historyIndex);
     }
 
     @Override
