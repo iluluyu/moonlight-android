@@ -745,18 +745,18 @@
     <!-- Physical keyboard capture backend (Shizuku vs Accessibility) -->
     <string name="title_keyboard_capture_mode">Keyboard capture</string>
     <string name="summary_keyboard_capture_mode">How Artemis captures the physical keyboard during streaming</string>
-    <string name="summary_keyboard_capture_mode_state">Selected: %1$s\n%2$s</string>
-    <string name="keyboard_capture_mode_shizuku">Shizuku (recommended)</string>
+    <string name="summary_keyboard_capture_mode_state">Selected: %1$s · %2$s</string>
+    <string name="keyboard_capture_mode_shizuku">Shizuku</string>
     <string name="keyboard_capture_mode_accessibility">Accessibility service</string>
-    <string name="keyboard_capture_mode_off">Off (framework only)</string>
-    <string name="keyboard_capture_status_shizuku">Active: Shizuku exclusive capture (blocks OEM shortcuts such as OPPO Win→AI)</string>
-    <string name="keyboard_capture_status_accessibility">Active: Accessibility service</string>
-    <string name="keyboard_capture_status_framework">Active: Android framework (system shortcuts may intercept keys)</string>
-    <string name="keyboard_capture_accessibility_disabled">Accessibility service is selected but not enabled in Android settings</string>
-    <string name="keyboard_capture_shizuku_unavailable">Shizuku unavailable: %1$s. %2$s</string>
-    <string name="keyboard_capture_shizuku_unsupported">Android version is unsupported</string>
-    <string name="keyboard_capture_shizuku_not_running">service is not installed or running</string>
-    <string name="keyboard_capture_shizuku_version_too_old">service version is too old</string>
-    <string name="keyboard_capture_shizuku_permission_required">permission is required; select Shizuku to request it</string>
-    <string name="keyboard_capture_shizuku_ready">ready</string>
+    <string name="keyboard_capture_status_active">Active</string>
+    <string name="keyboard_capture_status_inactive">Inactive</string>
+    <!-- Shizuku authorization guidance -->
+    <string name="shizuku_not_running_title">Shizuku service not running</string>
+    <string name="shizuku_not_running_message">Start the Shizuku service, then return here. Shizuku must be running for keyboard capture to work.</string>
+    <string name="shizuku_not_installed_title">Shizuku not installed</string>
+    <string name="shizuku_not_installed_message">Install the Shizuku app to enable exclusive keyboard capture (blocks system shortcuts during streaming).</string>
+    <string name="shizuku_permission_denied_title">Shizuku permission required</string>
+    <string name="shizuku_permission_denied_message">Keyboard capture needs Shizuku permission. Open Shizuku and allow access for Artemis.</string>
+    <string name="shizuku_open">Open Shizuku</string>
+    <string name="shizuku_not_ready_toast">Shizuku keyboard capture is not active. Check authorization in settings.</string>
 </resources>

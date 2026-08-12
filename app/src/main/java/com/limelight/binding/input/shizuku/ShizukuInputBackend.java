@@ -41,10 +41,6 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
         void onSpecialCombo(int linuxKeyCode);
     }
 
-    /** Notified when a trackpad multi-finger gesture is detected (via Shizuku evdev). */
-    public interface GestureListener {
-        void onGesture(int gestureType);
-    }
 
     private static ShizukuInputBackend instance;
 
@@ -76,11 +72,9 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
     private Shizuku.UserServiceArgs userServiceArgs;
     private StateListener stateListener;
     private SpecialComboListener specialComboListener;
-    private GestureListener gestureListener;
 
     private ShizukuInputBackend() {
     }
-
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -112,10 +106,6 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
     public void setSpecialComboListener(SpecialComboListener listener) {
         this.specialComboListener = listener;
-    }
-
-    public void setGestureListener(GestureListener listener) {
-        this.gestureListener = listener;
     }
 
     /** Begin capturing for a stream. Binds the UserService once (persistent). */
@@ -243,14 +233,6 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
         c.sendKeyboardInput(vk, down ? KeyboardPacket.KEY_DOWN : KeyboardPacket.KEY_UP,
                 modifierState, (byte) 0);
-    }
-
-    @Override
-    public void onTrackpadGesture(int gestureType) {
-        final GestureListener l = gestureListener;
-        if (l != null) {
-            l.onGesture(gestureType);
-        }
     }
 
     @Override

@@ -236,7 +236,7 @@ public class PreferenceConfiguration {
     public String customRefreshRate;
     public int meteredBitrate;
     public enum KeyboardCaptureMode {
-        SHIZUKU, ACCESSIBILITY, OFF
+        SHIZUKU, ACCESSIBILITY
     }
 
     public FormatOption videoFormat;
@@ -725,11 +725,9 @@ private static int getFramePacingValue(Context context) {
     static KeyboardCaptureMode parseKeyboardCaptureMode(String value) {
         if ("accessibility".equals(value)) {
             return KeyboardCaptureMode.ACCESSIBILITY;
-        } else if ("off".equals(value)) {
-            return KeyboardCaptureMode.OFF;
         } else {
-            // Shizuku is both the default and the safe fallback for the legacy
-            // "auto" value or any unknown value.
+            // Shizuku is the default and the safe fallback for legacy values
+            // ("auto", "off") or any unknown value.
             return KeyboardCaptureMode.SHIZUKU;
         }
     }

@@ -6,8 +6,5 @@ interface IInputEventCallback {
     // linuxKeyCode: the evdev key code (e.g. 1 = KEY_ESC, 30 = KEY_A, 158 = KEY_BACK)
     // value: 0 = key up, 1 = key down, 2 = key repeat
     oneway void onInputKeyEvent(int linuxKeyCode, int value, String devicePath);
-    // Trackpad multi-finger gesture detected from raw ABS_MT (bypasses ColorOS).
-    // gestureType constants live in ShizukuInputService (GESTURE_SWIPE_LEFT etc.).
-    oneway void onTrackpadGesture(int gestureType);
     oneway void onError(String message);
 }

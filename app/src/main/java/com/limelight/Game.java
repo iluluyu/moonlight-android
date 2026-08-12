@@ -1856,8 +1856,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     private void startShizukuKeyboardCapture() {
         PreferenceConfiguration.KeyboardCaptureMode mode = prefConfig.keyboardCaptureMode;
-        if (mode == PreferenceConfiguration.KeyboardCaptureMode.OFF
-                || mode == PreferenceConfiguration.KeyboardCaptureMode.ACCESSIBILITY) {
+        if (mode == PreferenceConfiguration.KeyboardCaptureMode.ACCESSIBILITY) {
             LimeLog.info("Shizuku keyboard capture skipped (mode=" + mode + ")");
             return;
         }
@@ -1870,11 +1869,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 LimeLog.info("Shizuku keyboard capture active=" + active);
             });
             shizukuInputBackend.setSpecialComboListener(key -> runOnUiThread(() -> handleShizukuSpecialCombo(key)));
-            shizukuInputBackend.setGestureListener(gesture -> runOnUiThread(() -> handleTrackpadGesture(gesture)));
             shizukuInputBackend.startReading(conn);
             LimeLog.info("Shizuku keyboard capture requested");
         } else {
             LimeLog.info("Shizuku not ready, using framework keyboard path");
+            Toast.makeText(this, R.string.shizuku_not_ready_toast, Toast.LENGTH_LONG).show();
         }
     }
 

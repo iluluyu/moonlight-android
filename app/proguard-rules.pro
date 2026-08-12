@@ -6,6 +6,7 @@
 
 # Shizuku UserService (instantiated by Shizuku by class name; AIDL stubs)
 -keep class com.limelight.binding.input.shizuku.** {*;}
+-keep class rikka.shizuku.Shizuku { *; }
 
 # KeyMapper - keep all VK_* fields for reflection
 -keep class com.limelight.utils.KeyMapper {*;}
