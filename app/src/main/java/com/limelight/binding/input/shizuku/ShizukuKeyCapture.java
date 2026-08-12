@@ -82,7 +82,7 @@ public final class ShizukuKeyCapture {
             f.setBoolean(null, false);
             return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
         } catch (NoSuchFieldException | IllegalAccessException e) {
-            LimeLog.warning("Shizuku uncached: field reset failed: " + e);
+            LimeLog.warning("Shizuku permission cache reset failed: " + e);
             return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
         }
     }
