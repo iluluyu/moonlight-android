@@ -11,6 +11,19 @@ Artemis is currently the best fork of Moonlight with loads of optimizations for 
 
 A more seamless experience with virtual display will be Artemis paired with [Apollo](https://github.com/ClassicOldSong/Apollo).
 
+> **This is a personal fork** of Artemis Android, with specific optimizations for **OPPO Pad 4 Pro** trackpad and **Shizuku-based keyboard capture**.
+
+# Fork Features
+
+Built on top of Artemis Android, this fork adds the following enhancements:
+
+1. **Shizuku keyboard capture** — exclusive evdev-level keyboard grab via [Shizuku](https://github.com/RikkaApps/Shizuku), blocking OEM system shortcuts (e.g. OPPO Win→AI) during streaming and ensuring reliable physical key delivery including Esc.
+2. **OPPO Pad 4 Pro trackpad optimization** — refined multi-finger gesture detection, stabilized pinch/scroll/drag behavior, and Mac-style trackpad feel tailored for the OPPO Pad 4 Pro's physical trackpad.
+3. **Physical trackpad 3-finger gesture support** — three-finger swipe/tap mapped to Windows shortcuts (Alt+Tab, virtual desktop switch), configured through the framework MotionEvent path.
+4. **Keyboard capture mode selection** — choose between Shizuku (recommended) or Android Accessibility Service, with real-time active/inactive status display in settings.
+5. **Guided Shizuku authorization** — first-time setup guides users through permission granting with clear status feedback and fallback dialogs.
+6. **Stream-start Shizuku status notification** — Toast alerts when keyboard capture is not active at stream start.
+
 # Features
 
 If you switch back to the main stream version, you'll be missing the following awesome features which are very unlikely to be added there:
@@ -47,25 +60,22 @@ If you switch back to the main stream version, you'll be missing the following a
 30. Clipboard sync (requires Apollo)
 31. SBS 3D for external Displays (Using AI MiDaS v2 Lite)
 
-# Disclaimer
+## Acknowledgements
 
-This is the `go away` version of Moonlight Android.
-
-I got kicked from Moonlight and Sunshine's Discord server literally for helping people out.
-
-This is what I got for finding a bug, opened an issue, getting no response, troubleshoot myself, fixed the issue myself, shared it by PR to the main repo hoping my efforts can help someone else during the maintainance gap.
-
-Yes, I'm going away. Fixes and improvements on this fork are not necessarily be merged to the main repo either. I have also started [a fork of Sunshine called Apollo](https://github.com/ClassicOldSong/Apollo) and will add useful features that will never get merged by the main repo shortly. [Apollo](https://github.com/ClassicOldSong/Apollo) and [Moonlight Noir](https://github.com/ClassicOldSong/moonlight-android) will no longer be compatible with OG Sunshine and OG Moonlight eventually, but they'll work even better with much more carefully designed features.
-
-The main repo had stayed silent for 5 months, with nobody actually responding to issues, and people are getting totally no help besides the limited FAQ in their Discord server. I tried to answer issues and questions, solve problems within my ablilty but I got kicked out just for helping others.
-
-**PRs for feature improvements are welcomed here unlike the main repo, your ideas are more likely to be appreciated and your efforts are actually being respected. We welcome people who can and willing to share their efforts, helping yourselves and other people in need.**
-
-**Update**: They have contacted me and apologized for this incident, but the fact it **happened** still motivated me to start my own fork.
+This fork builds upon [Artemis Android](https://github.com/ClassicOldSong/moonlight-android) (formerly Moonlight Noir) by [ClassicOldSong](https://github.com/ClassicOldSong). All credit for the core Artemis feature set goes to the original author.
 
 ## Downloads
-* [Download APK directly](https://github.com/ClassicOldSong/moonlight-android/releases)
-* [Use Obtainium](https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.limelight.noir%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FClassicOldSong%2Fmoonlight-android%22%2C%22author%22%3A%22ClassicOldSong%22%2C%22name%22%3A%22Artemis%22%2C%22additionalSettings%22%3A%22%7B%5C%22apkFilterRegEx%5C%22%3A%5C%22nonRoot%5C%22%2C%5C%22matchGroutToUse%5C%22%3A%5C%22%241%5C%22%2C%5C%22versionExtractionRegEx%5C%22%3A%5C%22v(.%2B)%5C%22%7D%22%7D) (recommended)
+* [Download APK directly](https://github.com/iluluyu/moonlight-android/releases)
+* [Use Obtainium](https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.limelight.noir%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Filuluyu%2Fmoonlight-android%22%2C%22author%22%3A%22iluluyu%22%2C%22name%22%3A%22Artemis%22%2C%22additionalSettings%22%3A%22%7B%5C%22apkFilterRegEx%5C%22%3A%5C%22nonRoot%5C%22%2C%5C%22matchGroutToUse%5C%22%3A%5C%22%241%5C%22%2C%5C%22versionExtractionRegEx%5C%22%3A%5C%22v(.%2B)%5C%22%7D%22%7D) (recommended)
+
+## Shizuku Setup (Optional, Recommended)
+
+Shizuku enables exclusive keyboard capture that blocks OEM system shortcuts during streaming. To use it:
+
+1. Install [Shizuku](https://github.com/RikkaApps/Shizuku) from Google Play or GitHub Releases.
+2. Start the Shizuku service (via Wireless Debugging or ADB).
+3. In Artemis → Settings → Advanced → Keyboard capture, select **Shizuku**.
+4. Grant permission when prompted. The status should show "Active".
 
 ## Building
 * Install Android Studio and the Android NDK
