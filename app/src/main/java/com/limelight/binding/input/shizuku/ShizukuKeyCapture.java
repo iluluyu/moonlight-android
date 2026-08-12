@@ -80,12 +80,11 @@ public final class ShizukuKeyCapture {
             java.lang.reflect.Field f = Shizuku.class.getDeclaredField("permissionGranted");
             f.setAccessible(true);
             f.setBoolean(null, false);
+            return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
         } catch (NoSuchFieldException | IllegalAccessException e) {
-            // Cache field not accessible (e.g. renamed by an optimizer) — fall back
-            // to the potentially-stale checkSelfPermission() result.
-            LimeLog.warning("Could not reset Shizuku permission cache: " + e);
+            LimeLog.warning("Shizuku uncached: field reset failed: " + e);
+            return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
         }
-        return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
     }
     /**
      * Ask Shizuku for permission if it is available but not yet granted.
