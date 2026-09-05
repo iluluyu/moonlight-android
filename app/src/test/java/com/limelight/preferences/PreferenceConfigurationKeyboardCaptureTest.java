@@ -6,7 +6,7 @@ import org.junit.Test;
 
 public class PreferenceConfigurationKeyboardCaptureTest {
     @Test
-    public void shizukuIsDefaultAndLegacyAutoMigrationTarget() {
+    public void shizukuIsDefaultAndLegacyValueFallback() {
         assertEquals(PreferenceConfiguration.KeyboardCaptureMode.SHIZUKU,
                 PreferenceConfiguration.parseKeyboardCaptureMode(null));
         assertEquals(PreferenceConfiguration.KeyboardCaptureMode.SHIZUKU,
@@ -15,13 +15,14 @@ public class PreferenceConfigurationKeyboardCaptureTest {
                 PreferenceConfiguration.parseKeyboardCaptureMode("auto"));
         assertEquals(PreferenceConfiguration.KeyboardCaptureMode.SHIZUKU,
                 PreferenceConfiguration.parseKeyboardCaptureMode("shizuku"));
+        // Legacy "off" values fall back to shizuku after the mode was removed
+        assertEquals(PreferenceConfiguration.KeyboardCaptureMode.SHIZUKU,
+                PreferenceConfiguration.parseKeyboardCaptureMode("off"));
     }
 
     @Test
-    public void explicitFallbackModesRemainAvailable() {
+    public void accessibilityRemainsAvailable() {
         assertEquals(PreferenceConfiguration.KeyboardCaptureMode.ACCESSIBILITY,
                 PreferenceConfiguration.parseKeyboardCaptureMode("accessibility"));
-        assertEquals(PreferenceConfiguration.KeyboardCaptureMode.OFF,
-                PreferenceConfiguration.parseKeyboardCaptureMode("off"));
     }
 }
