@@ -133,7 +133,12 @@ public class NvConnection {
     private int detectServerConnectionType() {
         ConnectivityManager connMgr = (ConnectivityManager) appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Network activeNetwork = connMgr.getActiveNetwork();
+            // Prefer the process-bound network (e.g. the Ethernet network bound for streaming),
+            // falling back to the system default network when no binding is active.
+            Network activeNetwork = connMgr.getBoundNetworkForProcess();
+            if (activeNetwork == null) {
+                activeNetwork = connMgr.getActiveNetwork();
+            }
             if (activeNetwork != null) {
                 NetworkCapabilities netCaps = connMgr.getNetworkCapabilities(activeNetwork);
                 if (netCaps != null) {

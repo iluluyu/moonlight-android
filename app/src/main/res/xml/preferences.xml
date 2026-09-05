@@ -497,6 +497,12 @@
             android:summary="@string/summary_checkbox_host_audio"
             android:title="@string/title_checkbox_host_audio"
             app:iconSpaceReserved="false" />
+        <CheckBoxPreference
+            android:defaultValue="true"
+            android:key="checkbox_prefer_ethernet"
+            android:summary="@string/summary_checkbox_prefer_ethernet"
+            android:title="@string/title_checkbox_prefer_ethernet"
+            app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

@@ -89,6 +89,7 @@
     <string name="conn_establishing_title"> 建立连接中 </string>
     <string name="conn_establishing_msg"> 启动连接中 </string>
     <string name="conn_metered"> 警告：你正在使用移动网络连接！ </string>
+    <string name="conn_ethernet_bound"> 已切换到有线网络串流 </string>
     <string name="conn_client_latency"> 平均每帧解码延迟：</string>
     <string name="conn_client_latency_hw"> 硬件解码器延迟：</string>
     <string name="conn_hardware_latency"> 硬件解码器平均延迟：</string>
@@ -733,4 +734,8 @@
     <string name="shizuku_permission_denied_message">键盘捕获需要 Shizuku 授权。请打开 Shizuku 并允许 Artemis 访问。</string>
     <string name="shizuku_open">打开 Shizuku</string>
     <string name="shizuku_not_ready_toast">Shizuku 键盘捕获未生效，请在设置中检查授权。</string>
+
+    <!-- 串流网络偏好（USB 网卡） -->
+    <string name="title_checkbox_prefer_ethernet">网线优先</string>
+    <string name="summary_checkbox_prefer_ethernet">检测到有线网络（如 USB 网卡）时串流走网线，否则使用默认网络</string>
 </resources>

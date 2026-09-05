@@ -53,6 +53,7 @@ import com.limelight.ui.ExternalControllerView;
 import com.limelight.ui.GameGestures;
 import com.limelight.ui.StreamContainer;
 import com.limelight.utils.Dialog;
+import com.limelight.utils.EthernetRouteBinder;
 import com.limelight.utils.ExternalDisplayControlActivity;
 import com.limelight.utils.MouseModeOption;
 import com.limelight.utils.PanZoomHandler;
@@ -384,6 +385,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     private WifiManager.WifiLock highPerfWifiLock;
     private WifiManager.WifiLock lowLatencyWifiLock;
+    private boolean boundToEthernet;
+    private volatile boolean stopThreadStarted;
 
     private boolean connectedToUsbDriverService = false;
     private ServiceConnection usbDriverServiceConnection = new ServiceConnection() {
@@ -708,6 +711,17 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // Some Samsung Galaxy S10+/S10e devices throw a SecurityException from
             // WifiLock.acquire() even though we have android.permission.WAKE_LOCK in our manifest.
             e.printStackTrace();
+        }
+
+        // Bind the process to a wired network (e.g. a USB Ethernet adapter) for the duration
+        // of the streaming session. Sockets created afterwards - including moonlight-common-c's
+        // native sockets - follow the binding, while the rest of the system keeps using the
+        // default network. This must happen before any stream socket is created.
+        if (prefConfig.preferEthernet) {
+            boundToEthernet = EthernetRouteBinder.bind(this);
+            if (boundToEthernet) {
+                displayTransientMessage(getResources().getString(R.string.conn_ethernet_bound));
+            }
         }
 
         appName = Game.this.getIntent().getStringExtra(EXTRA_APP_NAME);
@@ -2106,6 +2120,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
         if (highPerfWifiLock != null) {
             highPerfWifiLock.release();
+        }
+
+        if (!stopThreadStarted) {
+            // The stop thread never ran, so release any Ethernet binding here
+            releaseEthernetBinding();
         }
 
         // Save zoom/pan before other cleanup
@@ -4786,6 +4805,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // thread to keep things smooth for the UI. Inside moonlight-common,
             // we prevent another thread from starting a connection before and
             // during the process of stopping this one.
+            stopThreadStarted = true;
             new Thread() {
                 public void run() {
                     conn.stop();
@@ -4798,8 +4818,18 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                             Game.this.runOnUiThread(() -> Toast.makeText(Game.this, e.getMessage(), Toast.LENGTH_LONG).show());
                         }
                     }
+
+                    // Restore the default network only after the goodbye traffic has drained
+                    releaseEthernetBinding();
                 }
             }.start();
+        }
+    }
+
+    private void releaseEthernetBinding() {
+        if (boundToEthernet) {
+            boundToEthernet = false;
+            EthernetRouteBinder.release(this);
         }
     }
 

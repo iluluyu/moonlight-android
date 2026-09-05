@@ -94,6 +94,7 @@ public class PreferenceConfiguration {
     private static final String GAMEPAD_MOTION_FALLBACK_PREF_STRING = "checkbox_gamepad_motion_fallback";
     private static final String FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING = "checkbox_force_device_motion";
     private static final String FULL_SCREEN_PREF_STRING = "checkbox_full_screen";
+    private static final String PREFER_ETHERNET_PREF_STRING = "checkbox_prefer_ethernet";
 
     private static final String ENABLE_RUMBLE_PREF_STRING = "checkbox_enable_rumble";
     private static final String PREVENT_PACKET_LOSS_PREF_STRING = "checkbox_prevent_packet_loss";
@@ -213,6 +214,7 @@ public class PreferenceConfiguration {
     private static final float DEFAULT_ZOOM_SCALE = 1.0f;
     private static final float DEFAULT_PAN_OFFSET = 0.0f;
     private static final boolean DEFAULT_FULL_SCREEN = true;
+    private static final boolean DEFAULT_PREFER_ETHERNET = true;
 
     public static final int FRAME_PACING_MIN_LATENCY = 0;
     public static final int FRAME_PACING_BALANCED = 1;
@@ -249,7 +251,7 @@ public class PreferenceConfiguration {
     public boolean onscreenKeyboardAutoFitDisabled;
     public int onscreenKeyboardWidth;
     public String onscreenKeyboardAlignMode;
-    public boolean enforceDisplayMode, useVirtualDisplay, enableSops, playHostAudio, disableWarnings, fullScreen;
+    public boolean enforceDisplayMode, useVirtualDisplay, enableSops, playHostAudio, disableWarnings, fullScreen, preferEthernet;
     public ScaleMode videoScaleMode;
     public String language;
     public int renderMode;
@@ -910,6 +912,7 @@ private static int getFramePacingValue(Context context) {
         config.multiController = prefs.getBoolean(MULTI_CONTROLLER_PREF_STRING, DEFAULT_MULTI_CONTROLLER);
         config.usbDriver = prefs.getBoolean(USB_DRIVER_PREF_SRING, DEFAULT_USB_DRIVER);
         config.fullScreen = prefs.getBoolean(FULL_SCREEN_PREF_STRING, DEFAULT_FULL_SCREEN);
+        config.preferEthernet = prefs.getBoolean(PREFER_ETHERNET_PREF_STRING, DEFAULT_PREFER_ETHERNET);
 
         String renderMode = prefs.getString("render_mode_list", "0");
         int renderModeInt = Integer.parseInt(renderMode);
