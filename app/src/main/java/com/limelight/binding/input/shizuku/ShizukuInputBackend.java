@@ -6,6 +6,7 @@ import android.os.IBinder;
 
 import com.limelight.BuildConfig;
 import com.limelight.LimeLog;
+import com.limelight.binding.input.KeyboardTranslator;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.input.KeyboardPacket;
 import com.limelight.utils.KeyMapper;
@@ -65,6 +66,14 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
     private NvConnection conn;
     private volatile byte modifierState = 0;
+
+    // Windows VK codes currently held down (in press order), for keys we
+    // actually forwarded to the host. Tracked so the client can force-release
+    // them before tearing the connection down: the host does NOT release
+    // client-held keys when the client disappears, so a key that is down when
+    // the session ends would stay stuck on the host (e.g. Win/Ctrl/Alt).
+    private final java.util.ArrayDeque<Short> heldKeys = new java.util.ArrayDeque<>();
+
     private IInputEventService service;
     private boolean bound = false;
     private volatile boolean started = false;
@@ -95,6 +104,10 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
             service = null;
             started = false;
             active = false;
+            // The session this state belonged to is gone; don't leak it into
+            // the next one.
+            modifierState = 0;
+            heldKeys.clear();
             LimeLog.warning("ShizukuInputBackend: UserService disconnected (no longer active)");
             notifyState();
         }
@@ -120,6 +133,14 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
     /** Stop capturing for the stream: release the grab and stop readers, keep binding. */
     public synchronized void stopReading() {
+        // Release any keys we still report as held down on the host before we
+        // detach from the session; after this point their key-up events can no
+        // longer be forwarded, and the host keeps client-held keys pressed when
+        // the client disappears. This is usually a no-op because Game flushes
+        // earlier (while the control stream is definitely alive); it exists as
+        // a safety net for other callers.
+        flushHeldKeys();
+
         this.conn = null;
         if (service != null) {
             try {
@@ -193,8 +214,30 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
         }
     }
 
+    /** Sends KEY_UP to the host for every key we currently believe is held
+     *  down (most recently pressed first), then clears the tracking state.
+     *  Call this while the connection is still alive, before stopping it. */
+    public synchronized void flushHeldKeys() {
+        NvConnection c = conn;
+
+        while (!heldKeys.isEmpty()) {
+            short vk = heldKeys.removeLast();
+
+            // Drop this key's modifier before releasing it, mirroring how
+            // Game.sendKeys() sequences modifier releases.
+            modifierState &= ~KeyboardTranslator.getModifier(vk);
+
+            if (c != null) {
+                c.sendKeyboardInput(vk, KeyboardPacket.KEY_UP, modifierState, (byte) 0);
+            }
+        }
+
+        // All held keys (and thus all modifiers) are up now.
+        modifierState = 0;
+    }
+
     @Override
-    public void onInputKeyEvent(int linuxKeyCode, int value, String devicePath) {
+    public synchronized void onInputKeyEvent(int linuxKeyCode, int value, String devicePath) {
         boolean down = (value != 0);
 
         byte modFlag = modifierFlag(linuxKeyCode);
@@ -233,6 +276,18 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
         c.sendKeyboardInput(vk, down ? KeyboardPacket.KEY_DOWN : KeyboardPacket.KEY_UP,
                 modifierState, (byte) 0);
+
+        // Track held state for the force-release on teardown. A key-down that
+        // was never forwarded (special combo, unmapped) is never tracked, so
+        // its key-up below only removes a non-existent entry.
+        if (down) {
+            if (!heldKeys.contains(vk)) {
+                heldKeys.addLast(vk);
+            }
+        }
+        else {
+            heldKeys.remove(vk);
+        }
     }
 
     @Override

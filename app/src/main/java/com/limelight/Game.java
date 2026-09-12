@@ -4800,6 +4800,16 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // Update GameManager state to indicate we're no longer in game
             UiHelper.notifyStreamEnded(this);
 
+            // The control stream is torn down a moment later inside conn.stop();
+            // once that runs, any release packets we send are silently dropped.
+            // Flush everything this client may still be holding down on the host
+            // (synthetic Alt from the trackpad Alt+Tab switcher, trackpad mouse
+            // buttons, keys held through the Shizuku keyboard grab) while the
+            // connection is still alive. The host does NOT release client-held
+            // keys when we disappear, so a missed release leaves Win/Ctrl/Alt
+            // stuck down on the host after the session ends.
+            releaseRemoteInputState();
+
             // Stop may take a few hundred ms to do some network I/O to tell
             // the server we're going away and clean up. Let it run in a separate
             // thread to keep things smooth for the UI. Inside moonlight-common,
@@ -4818,11 +4828,44 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                             Game.this.runOnUiThread(() -> Toast.makeText(Game.this, e.getMessage(), Toast.LENGTH_LONG).show());
                         }
                     }
+                    else if (boundToEthernet) {
+                        // conn.stop() has returned, but the TCP FIN/teardown packets
+                        // for the control connection can still be queued on the bound
+                        // network. Restoring the process default network immediately
+                        // can make netd drop that goodbye traffic, in which case the
+                        // host never notices the disconnect and keeps its streaming
+                        // display configuration (e.g. virtual display active, primary
+                        // monitor switched off) until its own timeout fires. Give the
+                        // FINs time to drain before unbinding.
+                        try {
+                            sleep(500);
+                        } catch (InterruptedException e) {
+                        }
+                    }
 
                     // Restore the default network only after the goodbye traffic has drained
                     releaseEthernetBinding();
                 }
             }.start();
+        }
+    }
+
+    /** Sends release packets for anything this client may still be holding down
+     *  on the host. Must run while the control stream is still alive, i.e.
+     *  before conn.stop() tears the connection down. */
+    private void releaseRemoteInputState() {
+        try {
+            // Releases the synthetic Alt of an open Alt+Tab switcher plus any
+            // trackpad mouse buttons still pressed; resets gesture state.
+            cancelTrackpadInteractionState("stop-connection");
+
+            // Force-release physical keys held down through the Shizuku evdev
+            // grab (including Win/Ctrl/Alt/Shift modifiers).
+            if (shizukuInputBackend != null) {
+                shizukuInputBackend.flushHeldKeys();
+            }
+        } catch (Exception e) {
+            LimeLog.warning("Failed to release remote input state: " + e);
         }
     }
 
