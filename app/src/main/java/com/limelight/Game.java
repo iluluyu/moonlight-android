@@ -21,9 +21,11 @@ import com.limelight.binding.input.touch.RelativeTouchContext;
 import com.limelight.binding.input.driver.UsbDriverService;
 import com.limelight.binding.input.evdev.EvdevListener;
 import com.limelight.binding.input.touch.TouchContext;
+import com.limelight.binding.input.touch.TrackpadContactFilter;
 import com.limelight.binding.input.touch.TrackpadContext;
 import com.limelight.binding.input.touch.TrackpadGestureClassifier;
 import com.limelight.binding.input.touch.TrackpadGestureConfiguration;
+import com.limelight.binding.input.touch.TrackpadInputSource;
 import com.limelight.binding.input.touch.TrackpadRowBoundaryGuard;
 import com.limelight.binding.input.touch.TrackpadSelectionAccumulator;
 import com.limelight.binding.input.touch.TrackpadSwipeGestureDetector;
@@ -269,6 +271,165 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_START: return "START";
             case com.limelight.binding.input.shizuku.ShizukuInputService.GESTURE_END: return "END";
             default: return "?" + gestureType;
+        }
+    }
+
+    // On-device touchpad diagnostics. The ArtemisTP route log is the fastest way to
+    // see what a vendor input stack actually delivers, but reading logcat is not always
+    // possible (no adb on the streaming device), so debug builds mirror the same lines
+    // onto the stream surface for a screenshot.
+    private TextView tpDiagView;
+    private final ArrayDeque<String> tpDiagLines = new ArrayDeque<>();
+    private static final int TP_DIAG_MAX_LINES = 10;
+
+    private void initTrackpadDiagnosticsOverlay() {
+        if (!tpLog() || tpDiagView != null || streamContainer == null) {
+            return;
+        }
+
+        TextView view = new TextView(this);
+        view.setTextColor(0xFFFFFFFF);
+        view.setBackgroundColor(0x99000000);
+        view.setTextSize(9f);
+        view.setTypeface(android.graphics.Typeface.MONOSPACE);
+        view.setPadding(16, 12, 16, 12);
+        view.setClickable(false);
+        view.setFocusable(false);
+        view.setVisibility(View.GONE);
+        streamContainer.addView(view, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START));
+        tpDiagView = view;
+        appendTouchpadDeviceInventory();
+    }
+
+    /** One-time dump of pointer-like input devices. When a vendor build stops declaring
+     *  a keyboard touchpad as SOURCE_TOUCHPAD, no route line is ever emitted, and the
+     *  device inventory is the only on-device evidence left. */
+    private void appendTouchpadDeviceInventory() {
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (device == null) {
+                continue;
+            }
+
+            int sources = device.getSources();
+            boolean pointerLike = TrackpadInputSource.hasTouchpadSource(sources)
+                    || TrackpadInputSource.hasTouchscreenSource(sources)
+                    || (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
+            if (!pointerLike) {
+                continue;
+            }
+
+            String name = device.getName();
+            if (name != null && name.length() > 24) {
+                name = name.substring(0, 24);
+            }
+
+            String line = "dev" + id + " src=0x" + Integer.toHexString(sources) + " " + name;
+            Log.i(TP_LOG_TAG, "inventory " + line);
+            appendTrackpadDiagnosticLine(line);
+        }
+
+        appendTrackpadDiagnosticLine("-- touchpad route --");
+    }
+
+    /** True when this event must be handled by the physical-touchpad pipeline
+     *  (relative pointer, finger-count gestures, pinch).
+     *
+     *  <p>Source values are matched with bitmask tests: AOSP's captured touchpad path
+     *  emits exactly {@code SOURCE_TOUCHPAD}, but {@code TouchpadInputMapper} declares
+     *  {@code SOURCE_MOUSE | SOURCE_TOUCHPAD} and vendor builds may forward that
+     *  composite value per event, so an equality test silently drops the whole gesture
+     *  pipeline into the absolute-touchscreen path. A composite/vendor source is only
+     *  taken over once the platform is really feeding us captured relative axes —
+     *  otherwise the system has already synthesized pointer/tap/gesture events and
+     *  replaying them here would double-click.</p>
+     */
+    private boolean isPhysicalTrackpadEvent(MotionEvent event, int eventSource, int deviceSources) {
+        if (!TrackpadInputSource.isTrackpadEvent(eventSource, deviceSources,
+                event.getToolType(0))) {
+            return false;
+        }
+
+        if (eventSource == InputDevice.SOURCE_TOUCHPAD) {
+            return true;
+        }
+
+        return inputCaptureProvider.eventHasRelativeMouseAxes(event);
+    }
+
+    /** Debug-only touchpad route log, mirrored onto the on-device overlay. */
+    private void maybeLogTrackpadRoute(MotionEvent event, int eventSource, int deviceSources) {
+        if (!tpLog()) {
+            return;
+        }
+
+        if (!TrackpadInputSource.hasTouchpadSource(eventSource)
+                && !TrackpadInputSource.hasTouchpadSource(deviceSources)) {
+            return;
+        }
+
+        int action = event.getActionMasked();
+        long now = event.getEventTime();
+        if (action == MotionEvent.ACTION_MOVE
+                && now - lastTrackpadRouteLogMs < EVDEV_TOUCHPAD_LOG_INTERVAL_MS) {
+            return;
+        }
+        lastTrackpadRouteLogMs = now;
+
+        boolean handledAsTrackpad = isPhysicalTrackpadEvent(event, eventSource, deviceSources);
+        StringBuilder gestures = new StringBuilder();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            gestures.append(" cls=").append(event.getClassification());
+            gestures.append(" gsx=").append(event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE));
+            gestures.append(" gsy=").append(event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE));
+            gestures.append(" gpinch=").append(event.getAxisValue(MotionEvent.AXIS_GESTURE_PINCH_SCALE_FACTOR));
+            gestures.append(" gx=").append(event.getAxisValue(MotionEvent.AXIS_GESTURE_X_OFFSET));
+            gestures.append(" gy=").append(event.getAxisValue(MotionEvent.AXIS_GESTURE_Y_OFFSET));
+        }
+        gestures.append(" vs=").append(event.getAxisValue(MotionEvent.AXIS_VSCROLL));
+        gestures.append(" hs=").append(event.getAxisValue(MotionEvent.AXIS_HSCROLL));
+        gestures.append(" btn=0x").append(Integer.toHexString(event.getButtonState()));
+
+        String line = MotionEvent.actionToString(event.getAction())
+                + " src=0x" + Integer.toHexString(eventSource)
+                + " dev=0x" + Integer.toHexString(deviceSources)
+                + " tool=" + event.getToolType(0)
+                + " pc=" + event.getPointerCount()
+                + " hist=" + event.getHistorySize()
+                + " xy=" + (int) event.getX() + "," + (int) event.getY()
+                + gestures
+                + " rel=" + (int) inputCaptureProvider.getRelativeAxisX(event)
+                + "," + (int) inputCaptureProvider.getRelativeAxisY(event)
+                + " cap=" + inputCaptureProvider.isCapturingActive()
+                + " viewCap=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        && streamContainer.hasPointerCapture())
+                + " => " + (handledAsTrackpad ? "TRACKPAD" : "touchscreen/mouse");
+
+        Log.i(TP_LOG_TAG, "route " + line);
+        appendTrackpadDiagnosticLine(line);
+    }
+
+    private void appendTrackpadDiagnosticLine(String line) {
+        if (tpDiagView == null) {
+            return;
+        }
+
+        tpDiagLines.addLast(line);
+        while (tpDiagLines.size() > TP_DIAG_MAX_LINES) {
+            tpDiagLines.removeFirst();
+        }
+
+        StringBuilder text = new StringBuilder(tpDiagLines.size() * 80);
+        for (String queuedLine : tpDiagLines) {
+            text.append(queuedLine).append('\n');
+        }
+        tpDiagView.setText(text);
+
+        if (tpDiagView.getVisibility() != View.VISIBLE) {
+            tpDiagView.setVisibility(View.VISIBLE);
         }
     }
 
@@ -616,6 +777,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         streamContainer.setCommitTextEnabled(prefConfig.enableCommitText);
 
         rootView = streamContainer.getParent();
+        initTrackpadDiagnosticsOverlay();
 
         //串流画面 顶部居中显示
         if(prefConfig.alignDisplayTopCenter){
@@ -1883,18 +2045,416 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 LimeLog.info("Shizuku keyboard capture active=" + active);
             });
             shizukuInputBackend.setSpecialComboListener(key -> runOnUiThread(() -> handleShizukuSpecialCombo(key)));
-            shizukuInputBackend.startReading(conn);
-            LimeLog.info("Shizuku keyboard capture requested");
+            shizukuInputBackend.setTouchpadFrameSink(this::onShizukuTouchpadFrame);
+            // Android 17 / ColorOS 17's TouchpadInputMapper stops delivering raw
+            // multi-finger touchpad samples to apps even under pointer capture, so the
+            // UserService has to grab the pad node and forward contact frames for the
+            // finger-count gesture pipeline to keep working at all.
+            // The raw-evdev path exists because Android 17 / ColorOS 17 stopped
+            // forwarding multi-finger touchpad samples to apps; keep it off on older
+            // platforms where the framework path still works and is better tuned.
+            evdevTouchpadCaptureEnabled = prefConfig.trackpadRawEvdev
+                    && Build.VERSION.SDK_INT >= 37;
+            shizukuInputBackend.startReading(conn, evdevTouchpadCaptureEnabled);
+            if (evdevTouchpadCaptureEnabled) {
+                // The previous UserService process may still be releasing its grabs when
+                // this one enumerates, so a node can fail with EBUSY. Retry shortly, and
+                // keep watching for keyboard docks/undocks for the rest of the stream.
+                scheduleEvdevTouchpadRefresh(1500);
+                startEvdevTouchpadHotplugWatch();
+            }
+            LimeLog.info("Shizuku keyboard capture requested (sdk=" + Build.VERSION.SDK_INT + ")");
         } else {
             LimeLog.info("Shizuku not ready, using framework keyboard path");
             Toast.makeText(this, R.string.shizuku_not_ready_toast, Toast.LENGTH_LONG).show();
         }
     }
 
+    // --- Evdev touchpad bridge -----------------------------------------------------
+    // The Shizuku UserService grabs the physical touchpad node and forwards raw contact
+    // frames. They are converted back into SOURCE_TOUCHPAD MotionEvents so the whole
+    // existing, hand-tuned pipeline (TrackpadContext scrolling/taps/drags, the pinch
+    // classifier and the three/four-finger swipes) keeps working unchanged on platforms
+    // that no longer hand raw multi-finger samples to apps.
+    private static final int EVDEV_TOUCHPAD_DEVICE_ID = 0x7f01;
+    private static final int EVDEV_TOUCHPAD_MAX_QUEUE = 64;
+    /** Frames from the two OPPO pad nodes arrive a few ms apart with identical payload. */
+    private static final long EVDEV_TOUCHPAD_DUPE_WINDOW_MS = 5;
+    private static final long EVDEV_TOUCHPAD_LOG_INTERVAL_MS = 250;
+
+    /** One raw contact frame, queued from the binder thread for the main thread. */
+    private static final class EvdevPadFrame {
+        final int[] ids;
+        final int[] xs;
+        final int[] ys;
+        final int[] sizes;
+        final long timeMs;
+        final int xMax;
+        final int yMax;
+        final int buttonState;
+
+        EvdevPadFrame(int[] ids, int[] xs, int[] ys, int[] sizes, long timeMs,
+                int xMax, int yMax, int buttonState) {
+            this.ids = ids;
+            this.xs = xs;
+            this.ys = ys;
+            this.sizes = sizes;
+            this.timeMs = timeMs;
+            this.xMax = xMax;
+            this.yMax = yMax;
+            this.buttonState = buttonState;
+        }
+
+        /** Payload equality, used to drop the duplicate node's copy of a frame.
+         *  The timestamp is deliberately excluded: the two nodes stamp the same
+         *  physical frame a few ms apart. */
+        boolean samePayload(EvdevPadFrame other) {
+            return other != null
+                    && buttonState == other.buttonState
+                    && xMax == other.xMax
+                    && yMax == other.yMax
+                    && java.util.Arrays.equals(xs, other.xs)
+                    && java.util.Arrays.equals(ys, other.ys);
+        }
+    }
+
+    private final Handler evdevTouchpadHandler = new Handler(Looper.getMainLooper());
+    private final Object evdevTouchpadLock = new Object();
+    private final ArrayDeque<EvdevPadFrame> evdevTouchpadQueue = new ArrayDeque<>();
+    private boolean evdevTouchpadDrainPosted;
+    private int[] evdevTouchpadLastX = new int[0];
+    private int[] evdevTouchpadLastY = new int[0];
+    private EvdevPadFrame evdevTouchpadDupeFrame;
+    private long evdevTouchpadRawLogMs;
+    private long evdevTouchpadDownTimeMs;
+    private long evdevTouchpadLastEventTimeMs;
+    private boolean evdevTouchpadButtonDown;
+    private boolean evdevTouchpadCaptureEnabled;
+    private InputManager.InputDeviceListener evdevTouchpadDeviceListener;
+    private final Point evdevTouchpadDisplaySize = new Point();
+    private final TrackpadContactFilter trackpadContactFilter = new TrackpadContactFilter();
+    private long evdevTouchpadFilterLogMs;
+    private boolean evdevTouchpadFiltering;
+
+    /** Asks the UserService to (re)try grabbing touchpads that are not grabbed yet. */
+    private final Runnable evdevTouchpadRefreshRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (shizukuInputBackend != null) {
+                shizukuInputBackend.refreshTouchpadCapture();
+            }
+        }
+    };
+
+    private final Runnable evdevTouchpadDrainRunnable = new Runnable() {
+        @Override
+        public void run() {
+            while (true) {
+                EvdevPadFrame frame;
+                synchronized (evdevTouchpadLock) {
+                    frame = evdevTouchpadQueue.pollFirst();
+                    if (frame == null) {
+                        evdevTouchpadDrainPosted = false;
+                        return;
+                    }
+                }
+                dispatchEvdevTouchpadFrame(frame);
+            }
+        }
+    };
+
+    /** Binder thread: queue one raw contact frame from the Shizuku evdev reader. */
+    private void onShizukuTouchpadFrame(int[] ids, int[] xs, int[] ys, int[] sizes,
+            long eventTimeMs, int xMax, int yMax, int buttonState) {
+        if (xs == null || ys == null || xs.length != ys.length || xMax <= 0 || yMax <= 0) {
+            return;
+        }
+
+        if (BuildConfig.DEBUG && eventTimeMs - evdevTouchpadRawLogMs >= EVDEV_TOUCHPAD_LOG_INTERVAL_MS) {
+            evdevTouchpadRawLogMs = eventTimeMs;
+            StringBuilder raw = new StringBuilder("TPRAW pc=").append(xs.length);
+            int shown = Math.min(xs.length, 4);
+            for (int i = 0; i < shown; i++) {
+                raw.append(" p").append(i).append("=").append(xs[i]).append(",").append(ys[i]);
+                if (ids != null && i < ids.length) {
+                    raw.append(" id=").append(ids[i]);
+                }
+                if (sizes != null && i < sizes.length) {
+                    raw.append(" s=").append(sizes[i]);
+                }
+            }
+            raw.append(" pad=").append(xMax).append("x").append(yMax)
+                    .append(" btn=").append(buttonState);
+            Log.i(TP_LOG_TAG, raw.toString());
+        }
+
+        EvdevPadFrame frame = new EvdevPadFrame(
+                ids == null ? null : ids.clone(), xs.clone(), ys.clone(),
+                sizes == null ? null : sizes.clone(), eventTimeMs, xMax, yMax, buttonState);
+
+        if (frame.samePayload(evdevTouchpadDupeFrame)
+                && eventTimeMs - evdevTouchpadDupeFrame.timeMs <= EVDEV_TOUCHPAD_DUPE_WINDOW_MS) {
+            return;
+        }
+        evdevTouchpadDupeFrame = frame;
+
+        boolean post;
+        synchronized (evdevTouchpadLock) {
+            if (evdevTouchpadQueue.size() >= EVDEV_TOUCHPAD_MAX_QUEUE) {
+                evdevTouchpadQueue.pollFirst();
+            }
+            evdevTouchpadQueue.addLast(frame);
+            post = !evdevTouchpadDrainPosted;
+            evdevTouchpadDrainPosted = true;
+        }
+        if (post) {
+            evdevTouchpadHandler.post(evdevTouchpadDrainRunnable);
+        }
+    }
+
+    private void dispatchEvdevTouchpadFrame(EvdevPadFrame frame) {
+        if (!grabbedInput || streamContainer == null) {
+            return;
+        }
+
+        int xMax = frame.xMax;
+        int yMax = frame.yMax;
+        int buttonState = frame.buttonState;
+
+        // Use the timestamp taken by the reader thread, not the drain time: when the
+        // main thread is busy several frames are drained back to back, and stamping
+        // them all with "now" collapses the elapsed time that pointer acceleration,
+        // the velocity EMA and scroll friction are all computed from.
+        long eventTimeMs = Math.max(evdevTouchpadLastEventTimeMs + 1, frame.timeMs);
+        evdevTouchpadLastEventTimeMs = eventTimeMs;
+
+        // Reading the pad node bypasses the framework's own noise/palm filters, so drop
+        // contacts that cannot be a real gesture finger (sensor noise, a thumb resting
+        // on the pad) before they change the pointer count.
+        boolean[] keep = new boolean[frame.xs.length];
+        int count = trackpadContactFilter.select(eventTimeMs, frame.ids, frame.xs,
+                frame.ys, frame.sizes, keep);
+
+        // When a contact is filtered out the pointer count changes under the gesture
+        // layer, which still has the un-filtered identity armed (e.g. the three-finger
+        // stroke armed by "thumb + two fingers"). Tear that identity down so the drop
+        // cannot later be reported as a three-finger swipe/tap.
+        boolean filteredOut = count < frame.xs.length;
+        if (filteredOut != evdevTouchpadFiltering) {
+            evdevTouchpadFiltering = filteredOut;
+            if (filteredOut) {
+                finishThreeFingerStroke(eventTimeMs, false);
+                finishFourFingerStroke(eventTimeMs);
+                multiFingerGestureSuppressedUntilUp = false;
+                resetTrackpadContexts();
+                multiFingerTailGuardUntil = eventTimeMs + MULTI_FINGER_TAIL_GUARD_MS;
+            }
+        }
+
+        int[] xs = new int[count];
+        int[] ys = new int[count];
+        int filled = 0;
+        for (int i = 0; i < frame.xs.length; i++) {
+            if (keep[i]) {
+                xs[filled] = frame.xs[i];
+                ys[filled] = frame.ys[i];
+                filled++;
+            } else if (BuildConfig.DEBUG
+                    && eventTimeMs - evdevTouchpadFilterLogMs >= EVDEV_TOUCHPAD_LOG_INTERVAL_MS) {
+                evdevTouchpadFilterLogMs = eventTimeMs;
+                Log.i(TP_LOG_TAG, "TPFILTER drop i=" + i
+                        + " size=" + (frame.sizes != null && i < frame.sizes.length
+                                ? frame.sizes[i] : -1)
+                        + " still=" + trackpadContactFilter.stationaryMs(eventTimeMs,
+                                frame.ids, i, frame.xs, frame.ys) + "ms"
+                        + " pc=" + frame.xs.length);
+            }
+        }
+
+        // Physical (button-pad) click: the pad node is grabbed, so the framework can no
+        // longer turn it into a button event; forward it ourselves.
+        boolean buttonDown = (buttonState & 1) != 0;
+        if (buttonDown != evdevTouchpadButtonDown) {
+            evdevTouchpadButtonDown = buttonDown;
+            if (buttonDown) {
+                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                TrackpadContext.primaryButtonDown = true;
+            } else {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+                TrackpadContext.primaryButtonDown = false;
+            }
+        }
+
+        if (count == 0) {
+            // Refresh the cached display size while the pad is idle, so the pad -> display
+            // mapping does not depend on window/letterbox size and stays identical to the
+            // framework's own captured-touchpad scale.
+            refreshEvdevTouchpadDisplaySize();
+            if (evdevTouchpadLastX.length == 0) {
+                return;
+            }
+        }
+
+        // Pad space -> display space, mirroring the framework's captured-touchpad
+        // uniform fixedScale = max(displayW / padW, displayH / padH).
+        int displayWidth = evdevTouchpadDisplaySize.x > 0
+                ? evdevTouchpadDisplaySize.x : streamContainer.getWidth();
+        int displayHeight = evdevTouchpadDisplaySize.y > 0
+                ? evdevTouchpadDisplaySize.y : streamContainer.getHeight();
+        float scale = Math.max(
+                Math.max(1, displayWidth) / (float) xMax,
+                Math.max(1, displayHeight) / (float) yMax);
+
+        int prevCount = evdevTouchpadLastX.length;
+
+        // Expand/contract one contact at a time. MotionEvent's contract is that
+        // ACTION_DOWN/UP carry a single pointer and ACTION_POINTER_DOWN/UP carry the
+        // transient set; a single 2-pointer ACTION_UP (which a simultaneous two-finger
+        // lift would otherwise produce) makes handleTouchInput run both the pending-tap
+        // path and the "remaining finger becomes primary" path, which fired a two-finger
+        // tap's right click twice.
+        if (count > prevCount) {
+            for (int n = prevCount; n < count; n++) {
+                boolean first = n == 0;
+                dispatchEvdevPadEvent(
+                        first ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_POINTER_DOWN,
+                        first ? 0 : n, xs, ys, n + 1, scale, eventTimeMs);
+                if (first) {
+                    evdevTouchpadDownTimeMs = eventTimeMs;
+                }
+            }
+        } else if (count < prevCount) {
+            for (int n = prevCount; n > count; n--) {
+                boolean last = n == 1;
+                dispatchEvdevPadEvent(
+                        last ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP,
+                        last ? 0 : n - 1, evdevTouchpadLastX, evdevTouchpadLastY, n,
+                        scale, eventTimeMs);
+            }
+        } else if (count > 0) {
+            dispatchEvdevPadEvent(MotionEvent.ACTION_MOVE, 0, xs, ys, count, scale,
+                    eventTimeMs);
+        }
+
+        evdevTouchpadLastX = xs;
+        evdevTouchpadLastY = ys;
+    }
+
+    /** Builds one SOURCE_TOUCHPAD MotionEvent and feeds the regular input pipeline. */
+    private void dispatchEvdevPadEvent(int action, int actionIndex, int[] xs, int[] ys,
+            int pointerCount, float scale, long eventTimeMs) {
+        if (pointerCount <= 0 || xs == null || ys == null
+                || xs.length < pointerCount || ys.length < pointerCount) {
+            return;
+        }
+
+        MotionEvent.PointerProperties[] properties =
+                new MotionEvent.PointerProperties[pointerCount];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[pointerCount];
+        for (int i = 0; i < pointerCount; i++) {
+            MotionEvent.PointerProperties property = new MotionEvent.PointerProperties();
+            property.id = i;
+            property.toolType = MotionEvent.TOOL_TYPE_FINGER;
+            properties[i] = property;
+
+            MotionEvent.PointerCoords coord = new MotionEvent.PointerCoords();
+            coord.x = xs[i] * scale;
+            coord.y = ys[i] * scale;
+            coord.pressure = 1f;
+            coord.size = 1f;
+            coords[i] = coord;
+        }
+
+        int eventAction = action;
+        if (action == MotionEvent.ACTION_POINTER_DOWN
+                || action == MotionEvent.ACTION_POINTER_UP) {
+            eventAction = action | (actionIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+        }
+
+        MotionEvent synthesized = MotionEvent.obtain(
+                evdevTouchpadDownTimeMs, eventTimeMs, eventAction, pointerCount,
+                properties, coords, 0, 0, 1f, 1f, EVDEV_TOUCHPAD_DEVICE_ID, 0,
+                InputDevice.SOURCE_TOUCHPAD, 0);
+        try {
+            handleMotionEvent(streamContainer, synthesized);
+        } finally {
+            synthesized.recycle();
+        }
+    }
+
+    private void refreshEvdevTouchpadDisplaySize() {
+        try {
+            android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+            evdevTouchpadDisplaySize.set(metrics.widthPixels, metrics.heightPixels);
+        } catch (Exception e) {
+            evdevTouchpadDisplaySize.set(0, 0);
+        }
+    }
+
+    private void resetEvdevTouchpadState() {
+        trackpadContactFilter.reset();
+        evdevTouchpadFiltering = false;
+        synchronized (evdevTouchpadLock) {
+            evdevTouchpadQueue.clear();
+        }
+        evdevTouchpadLastX = new int[0];
+        evdevTouchpadLastY = new int[0];
+        evdevTouchpadDownTimeMs = 0;
+        evdevTouchpadLastEventTimeMs = 0;
+        evdevTouchpadButtonDown = false;
+    }
+
+    /** Watches input devices so a keyboard docked/undocked mid-stream gets re-enumerated. */
+    private void startEvdevTouchpadHotplugWatch() {
+        InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (inputManager == null) {
+            return;
+        }
+        if (evdevTouchpadDeviceListener == null) {
+            evdevTouchpadDeviceListener = new InputManager.InputDeviceListener() {
+                @Override
+                public void onInputDeviceAdded(int deviceId) {
+                    scheduleEvdevTouchpadRefresh(300);
+                }
+
+                @Override
+                public void onInputDeviceRemoved(int deviceId) {
+                    scheduleEvdevTouchpadRefresh(300);
+                }
+
+                @Override
+                public void onInputDeviceChanged(int deviceId) {
+                    scheduleEvdevTouchpadRefresh(300);
+                }
+            };
+        }
+        inputManager.registerInputDeviceListener(evdevTouchpadDeviceListener, null);
+    }
+
+    private void stopEvdevTouchpadHotplugWatch() {
+        evdevTouchpadHandler.removeCallbacks(evdevTouchpadRefreshRunnable);
+        if (evdevTouchpadDeviceListener == null) {
+            return;
+        }
+        InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (inputManager != null) {
+            inputManager.unregisterInputDeviceListener(evdevTouchpadDeviceListener);
+        }
+    }
+
+    private void scheduleEvdevTouchpadRefresh(long delayMs) {
+        evdevTouchpadHandler.removeCallbacks(evdevTouchpadRefreshRunnable);
+        evdevTouchpadHandler.postDelayed(evdevTouchpadRefreshRunnable, delayMs);
+    }
+
     private void stopShizukuKeyboardCapture() {
+        stopEvdevTouchpadHotplugWatch();
         if (shizukuInputBackend != null) {
+            shizukuInputBackend.setTouchpadFrameSink(null);
             shizukuInputBackend.stopReading();
         }
+        resetEvdevTouchpadState();
         shizukuKeyboardActive = false;
     }
 
@@ -3218,25 +3778,17 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         int eventSource = event.getSource();
         int deviceSources = event.getDevice() != null ? event.getDevice().getSources() : 0;
-        if (tpLog() && (eventSource == InputDevice.SOURCE_TOUCHPAD
-                || (deviceSources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD)) {
-            int action = event.getActionMasked();
-            long now = event.getEventTime();
-            if (action != MotionEvent.ACTION_MOVE || now - lastTrackpadRouteLogMs >= 1000) {
-                lastTrackpadRouteLogMs = now;
-                Log.i(TP_LOG_TAG, "route action=" + MotionEvent.actionToString(event.getAction())
-                        + " source=0x" + Integer.toHexString(eventSource)
-                        + " tool=" + event.getToolType(0)
-                        + " pc=" + event.getPointerCount()
-                        + " hist=" + event.getHistorySize()
-                        + " xy=" + (int) event.getX() + "," + (int) event.getY()
-                        + " rel=" + inputCaptureProvider.getRelativeAxisX(event)
-                        + "," + inputCaptureProvider.getRelativeAxisY(event)
-                        + " grabbed=" + grabbedInput
-                        + " captureActive=" + inputCaptureProvider.isCapturingActive()
-                        + " viewCapture=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                                && streamContainer.hasPointerCapture()));
-            }
+        maybeLogTrackpadRoute(event, eventSource, deviceSources);
+
+        // A vendor input stack may drop pointer capture on its own (stream start, display
+        // switch, keyboard re-dock, configuration change). Without capture the framework
+        // stops delivering raw multi-finger touchpad samples and synthesizes its own
+        // pointer/wheel/gesture events instead, which silently disables the whole
+        // finger-count gesture pipeline. Re-request on any touchpad-sourced event;
+        // the provider throttles and only acts when capture is actually missing.
+        if (TrackpadInputSource.hasTouchpadSource(eventSource)
+                || TrackpadInputSource.hasTouchpadSource(deviceSources)) {
+            inputCaptureProvider.repairPointerCaptureIfLost();
         }
         if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
             if (controllerHandler.handleMotionEvent(event)) {
@@ -3536,7 +4088,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             }
             // This case is for fingers
             else {
-                if (eventSource == InputDevice.SOURCE_TOUCHPAD) {
+                if (isPhysicalTrackpadEvent(event, eventSource, deviceSources)) {
                     if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
                         recoverTrackpadContextsOnMove = false;
                         // A fresh contact is an intentional brake for any kinetic

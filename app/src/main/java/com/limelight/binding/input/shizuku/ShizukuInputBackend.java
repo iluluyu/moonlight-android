@@ -76,6 +76,13 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
 
     private IInputEventService service;
     private boolean bound = false;
+    /** Bumped whenever the UserService AIDL or its behaviour changes. Shizuku only
+     *  recreates a UserService process when {@code UserServiceArgs.version} changes, so
+     *  without this a developer build (same versionCode) kept running the previous
+     *  process - which then held the touchpad grab with old code and silently ignored
+     *  new AIDL calls. */
+    private static final int SERVICE_PROTOCOL_VERSION = 4;
+
     private volatile boolean started = false;
     private volatile boolean active = false;
     private Shizuku.UserServiceArgs userServiceArgs;
@@ -121,13 +128,52 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
         this.specialComboListener = listener;
     }
 
-    /** Begin capturing for a stream. Binds the UserService once (persistent). */
-    public synchronized void startReading(NvConnection conn) {
+    public interface TouchpadFrameSink {
+        /** One raw multitouch frame from the Shizuku evdev reader. Called on a binder
+         *  thread; implementations must hop to the main thread themselves.
+         *
+         *  @param ids stable contact ids, @param sizes normalized contact area 0..1000 */
+        void onTouchpadFrame(int[] ids, int[] xs, int[] ys, int[] sizes, long eventTimeMs,
+                int xMax, int yMax, int buttonState);
+    }
+
+    private volatile TouchpadFrameSink touchpadFrameSink;
+    private volatile boolean captureTouchpad;
+
+    /** Sets the receiver for raw touchpad frames (null detaches). */
+    public void setTouchpadFrameSink(TouchpadFrameSink sink) {
+        this.touchpadFrameSink = sink;
+    }
+
+    /** Begin capturing for a stream. Binds the UserService once (persistent).
+     *
+     *  @param captureTouchpad also grab the physical multitouch touchpad and forward
+     *         raw contact frames, for platforms (Android 17 / ColorOS 17) that no
+     *         longer deliver multi-finger samples to apps.
+     */
+    public synchronized void startReading(NvConnection conn, boolean captureTouchpad) {
         this.conn = conn;
+        this.captureTouchpad = captureTouchpad;
         if (bound && service != null) {
             startServiceIfNeeded();
         } else {
             ensureBound();
+        }
+    }
+
+    public synchronized void startReading(NvConnection conn) {
+        startReading(conn, false);
+    }
+
+    /** Retry grabbing touchpads that are not grabbed yet (hotplug, transient EBUSY). */
+    public synchronized void refreshTouchpadCapture() {
+        if (!started || service == null) {
+            return;
+        }
+        try {
+            service.refreshTouchpadCapture();
+        } catch (Exception e) {
+            LimeLog.warning("ShizukuInputBackend: refreshTouchpadCapture failed: " + e);
         }
     }
 
@@ -180,7 +226,7 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
                     ShizukuInputService.class.getName());
             userServiceArgs = new Shizuku.UserServiceArgs(cn)
                     .processNameSuffix("evdev")
-                    .version(2)
+                    .version(BuildConfig.VERSION_CODE * 100 + SERVICE_PROTOCOL_VERSION)
                     .tag("shizuku-input-evdev");
             Shizuku.bindUserService(userServiceArgs, serviceConnection);
             bound = true;
@@ -195,7 +241,7 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
             return;
         }
         try {
-            service.start(this);
+            service.start(this, captureTouchpad);
             started = true;
             active = true;
             LimeLog.info("ShizukuInputBackend: UserService started (active)");
@@ -287,6 +333,15 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
         }
         else {
             heldKeys.remove(vk);
+        }
+    }
+
+    @Override
+    public void onTouchpadFrame(int[] ids, int[] xs, int[] ys, int[] sizes,
+            long eventTimeMs, int xMax, int yMax, int buttonState) {
+        TouchpadFrameSink sink = touchpadFrameSink;
+        if (sink != null) {
+            sink.onTouchpadFrame(ids, xs, ys, sizes, eventTimeMs, xMax, yMax, buttonState);
         }
     }
 

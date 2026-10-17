@@ -136,6 +136,7 @@ public class PreferenceConfiguration {
     private static final String CHECKBOX_TRACKPAD_DRAG_DROP_VIBRATION = "checkbox_trackpad_drag_drop_vibration";
     private static final String SEEKBAR_TRACKPAD_DRAG_DROP_THRESHOLD = "seekbar_trackpad_drag_drop_threshold";
     private static final String CHECKBOX_TRACKPAD_SWAP_AXIS = "checkbox_trackpad_swap_axis";
+    private static final String CHECKBOX_TRACKPAD_RAW_EVDEV = "checkbox_trackpad_raw_evdev";
 
     private static final String CHECKBOX_ENABLE_COMMIT_TEXT = "checkbox_enable_commit_text";
 
@@ -206,6 +207,9 @@ public class PreferenceConfiguration {
     private static final boolean DEFAULT_TRACKPAD_DRAG_DROP_VIBRATION = false;
     private static final int DEFAULT_TRACKPAD_DRAG_DROP_THRESHOLD = 250;
     private static final boolean DEFAULT_TRACKPAD_SWAP_AXIS = false;
+    /** Android 17 (API 37) no longer forwards raw multi-finger touchpad samples to apps,
+     *  so reading the pad node through the Shizuku UserService is the default there. */
+    private static final boolean DEFAULT_TRACKPAD_RAW_EVDEV = android.os.Build.VERSION.SDK_INT >= 37;
     private static final boolean DEFAULT_ENABLE_COMMIT_TEXT = false;
     private static final String DEFAULT_ONSCREEN_KEYBOARD_ALIGN_MODE = "center";
     private static final boolean DEFAULT_SHOW_OVERLAY_TOGGLE_BUTTON = false;
@@ -358,6 +362,10 @@ public class PreferenceConfiguration {
     public boolean trackpadDragDropVibration;
     public int trackpadDragDropThreshold;
     public boolean trackpadSwapAxis;
+    /** Read the physical touchpad through the Shizuku evdev reader instead of relying on
+     *  framework MotionEvents (needed on Android 17 / ColorOS 17, where captured
+     *  touchpads arrive as SOURCE_MOUSE_RELATIVE with pointerCount 1). */
+    public boolean trackpadRawEvdev;
 
     public boolean bindAllUsb;
     public boolean mouseEmulation;
@@ -1028,6 +1036,7 @@ private static int getFramePacingValue(Context context) {
         config.trackpadDragDropVibration = prefs.getBoolean(CHECKBOX_TRACKPAD_DRAG_DROP_VIBRATION, DEFAULT_TRACKPAD_DRAG_DROP_VIBRATION);
         config.trackpadDragDropThreshold = prefs.getInt(SEEKBAR_TRACKPAD_DRAG_DROP_THRESHOLD, DEFAULT_TRACKPAD_DRAG_DROP_THRESHOLD);
         config.trackpadSwapAxis = prefs.getBoolean(CHECKBOX_TRACKPAD_SWAP_AXIS, DEFAULT_TRACKPAD_SWAP_AXIS);
+        config.trackpadRawEvdev = prefs.getBoolean(CHECKBOX_TRACKPAD_RAW_EVDEV, DEFAULT_TRACKPAD_RAW_EVDEV);
         config.absoluteMouseMode = prefs.getBoolean(ABSOLUTE_MOUSE_MODE_PREF_STRING, DEFAULT_ABSOLUTE_MOUSE_MODE);
         config.enableBatteryReport = prefs.getBoolean(CHECKBOX_ENABLE_BATTERY_REPORT, DEFAULT_GAMEPAD_ENABLE_BATTERY_REPORT);
         config.forceQwerty = prefs.getBoolean(CHECKBOX_FORCE_QWERTY, DEFAULT_FORCE_QWERTY);

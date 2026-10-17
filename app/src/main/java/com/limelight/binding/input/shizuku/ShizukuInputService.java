@@ -1,6 +1,7 @@
 package com.limelight.binding.input.shizuku;
 
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.File;
@@ -30,6 +31,16 @@ public class ShizukuInputService extends IInputEventService.Stub {
 
     private static final String TAG = "ShizukuInputService";
     private static final int EV_KEY = 0x01;
+    private static final int EV_SYN = 0x00;
+    private static final int EV_ABS = 0x03;
+    private static final int SYN_REPORT = 0x00;
+    private static final int ABS_MT_SLOT = 0x2f;
+    private static final int ABS_MT_POSITION_X = 0x35;
+    private static final int ABS_MT_POSITION_Y = 0x36;
+    private static final int ABS_MT_TRACKING_ID = 0x39;
+    private static final int ABS_MT_TOUCH_MAJOR = 0x30;
+    private static final int BTN_LEFT = 0x110;
+    private static final int MT_SLOT_COUNT = 16;
     private static final int INPUT_EVENT_SIZE = 24;
 
     private static final boolean GRAB_NATIVE_AVAILABLE;
@@ -45,6 +56,8 @@ public class ShizukuInputService extends IInputEventService.Stub {
     }
 
     private static native int nativeOpenKeyboardGrabbed(String path);
+    private static native int nativeOpenTouchpadGrabbed(String path);
+    private static native int[] nativeTouchpadAbsInfo(int fd);
 
     // Gesture types reported via IInputEventCallback.onTrackpadGesture.
     public static final int GESTURE_SWIPE_LEFT = 1;
@@ -60,13 +73,15 @@ public class ShizukuInputService extends IInputEventService.Stub {
     private final List<ParcelFileDescriptor> grabbedPfds = new ArrayList<>();
     private final List<FileInputStream> plainStreams = new ArrayList<>();
     private volatile boolean running = false;
+    private boolean touchpadCaptureStarted;
+    private final java.util.Set<String> grabbedTouchpadPaths = new java.util.HashSet<>();
     /** Latest callback; readers read this field so a rebind (start() called again while
      *  running, which Shizuku does) just updates the callback instead of tearing down
      *  and restarting all reader threads (which previously dropped all key events). */
     private volatile IInputEventCallback cb;
 
     @Override
-    public synchronized void start(IInputEventCallback cb) {
+    public synchronized void start(IInputEventCallback cb, boolean captureTouchpad) {
         // Always remember the latest callback. If readers are already running (a rebind
         // across streams, or Shizuku firing onServiceConnected more than once per bind),
         // just update the callback and return — restarting readers on every call
@@ -78,6 +93,13 @@ public class ShizukuInputService extends IInputEventService.Stub {
         // fails and every key is silently lost (the "breaks on the Nth stream" bug).
         killSiblingUserServiceProcesses();
         if (running) {
+            // A new stream reuses this process. Keep the readers alive but retry the
+            // touchpad grab, which may have been skipped when the keyboard was docked
+            // after the previous stream started.
+            if (captureTouchpad && !touchpadCaptureStarted) {
+                touchpadCaptureStarted = true;
+                startTouchpadCapture();
+            }
             return;
         }
         running = true;
@@ -125,6 +147,174 @@ public class ShizukuInputService extends IInputEventService.Stub {
         Log.i(TAG, "started uid=" + android.os.Process.myUid()
                 + " grabNative=" + GRAB_NATIVE_AVAILABLE
                 + " grabbed=" + grabbed + " readable=" + readable);
+
+        if (captureTouchpad && !touchpadCaptureStarted) {
+            touchpadCaptureStarted = true;
+            startTouchpadCapture();
+        }
+    }
+
+    /**
+     * Exclusively grab the physical multitouch touchpad (if any) and forward raw
+     * contact frames to the app.
+     *
+     * <p>Android 17 / ColorOS 17's {@code TouchpadInputMapper} stops delivering raw
+     * multi-finger samples to apps even while pointer capture is active: apps get
+     * {@code SOURCE_MOUSE_RELATIVE} with {@code pointerCount == 1}, taps become
+     * {@code BUTTON_PRESS} and scroll becomes {@code AXIS_VSCROLL}. Finger-count
+     * gestures can therefore only be recognised from the device node itself.</p>
+     *
+     * <p>The grab is released by {@link #stop()} or by process death (closing the fd
+     * drops EVIOCGRAB), so a crash restores system touchpad input automatically.</p>
+     */
+    private void startTouchpadCapture() {
+        if (!GRAB_NATIVE_AVAILABLE) {
+            return;
+        }
+
+        File[] devices = new File("/dev/input").listFiles();
+        if (devices == null) {
+            return;
+        }
+
+        for (File dev : devices) {
+            if (!dev.getName().startsWith("event")) {
+                continue;
+            }
+
+            final String path = dev.getAbsolutePath();
+            if (grabbedTouchpadPaths.contains(path)) {
+                continue;
+            }
+
+            int fd = nativeOpenTouchpadGrabbed(path);
+            if (fd < 0) {
+                continue;
+            }
+
+            int[] absInfo = nativeTouchpadAbsInfo(fd);
+            if (absInfo == null || absInfo.length != 3) {
+                try {
+                    ParcelFileDescriptor adopt = ParcelFileDescriptor.adoptFd(fd);
+                    adopt.close();
+                } catch (Exception ignored) {
+                }
+                continue;
+            }
+
+            ParcelFileDescriptor pfd = ParcelFileDescriptor.adoptFd(fd);
+            grabbedPfds.add(pfd);
+            grabbedTouchpadPaths.add(path);
+            startTouchpadReader(new FileInputStream(pfd.getFileDescriptor()), path,
+                    absInfo[0], absInfo[1], absInfo[2]);
+            Log.i(TAG, "touchpad grabbed " + path + " xMax=" + absInfo[0]
+                    + " yMax=" + absInfo[1] + " majorMax=" + absInfo[2]);
+            // Keep going: OPPO exposes the same physical pad twice (pogo_touchpad and
+            // the "Keyboard Touchpad" framework node). Both must be grabbed so the
+            // system stops acting on either; the app de-duplicates identical frames.
+        }
+    }
+
+    @Override
+    public synchronized void refreshTouchpadCapture() {
+        if (!touchpadCaptureStarted) {
+            touchpadCaptureStarted = true;
+        }
+        startTouchpadCapture();
+    }
+
+    private void startTouchpadReader(InputStream in, String path, int xMax, int yMax,
+            int touchMajorMax) {
+        Thread t = new Thread(() -> {
+            ByteBuffer bb = ByteBuffer.allocate(INPUT_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN);
+            byte[] buf = bb.array();
+            int[] slotX = new int[MT_SLOT_COUNT];
+            int[] slotY = new int[MT_SLOT_COUNT];
+            int[] slotId = new int[MT_SLOT_COUNT];
+            int[] slotSize = new int[MT_SLOT_COUNT];
+            boolean[] active = new boolean[MT_SLOT_COUNT];
+            final int majorMax = Math.max(1, touchMajorMax);
+            int currentSlot = 0;
+            int buttonState = 0;
+
+            try {
+                while (running) {
+                    int n = in.read(buf);
+                    if (n < 0) {
+                        break;
+                    }
+                    if (n != INPUT_EVENT_SIZE) {
+                        continue;
+                    }
+
+                    int type = bb.getShort(16) & 0xFFFF;
+                    int code = bb.getShort(18) & 0xFFFF;
+                    int value = bb.getInt(20);
+
+                    if (type == EV_ABS) {
+                        if (code == ABS_MT_SLOT) {
+                            if (value >= 0 && value < MT_SLOT_COUNT) {
+                                currentSlot = value;
+                            }
+                        } else if (code == ABS_MT_TRACKING_ID) {
+                            active[currentSlot] = value >= 0;
+                            slotId[currentSlot] = value + 1;
+                        } else if (code == ABS_MT_POSITION_X) {
+                            slotX[currentSlot] = value;
+                        } else if (code == ABS_MT_POSITION_Y) {
+                            slotY[currentSlot] = value;
+                        } else if (code == ABS_MT_TOUCH_MAJOR) {
+                            // Normalise to 0..1000 so the app does not depend on the
+                            // device's own touch-major range.
+                            slotSize[currentSlot] = value * 1000 / majorMax;
+                        }
+                    } else if (type == EV_KEY && code == BTN_LEFT) {
+                        if (value != 0) {
+                            buttonState |= 1;
+                        } else {
+                            buttonState &= ~1;
+                        }
+                    } else if (type == EV_SYN && code == SYN_REPORT) {
+                        int count = 0;
+                        for (int i = 0; i < MT_SLOT_COUNT; i++) {
+                            if (active[i]) {
+                                count++;
+                            }
+                        }
+
+                        int[] ids = new int[count];
+                        int[] xs = new int[count];
+                        int[] ys = new int[count];
+                        int[] sizes = new int[count];
+                        int index = 0;
+                        for (int i = 0; i < MT_SLOT_COUNT && index < count; i++) {
+                            if (active[i]) {
+                                ids[index] = slotId[i];
+                                xs[index] = slotX[i];
+                                ys[index] = slotY[i];
+                                sizes[index] = slotSize[i];
+                                index++;
+                            }
+                        }
+
+                        IInputEventCallback callback = cb;
+                        if (callback != null) {
+                            try {
+                                callback.onTouchpadFrame(ids, xs, ys, sizes,
+                                        SystemClock.uptimeMillis(), xMax, yMax, buttonState);
+                            } catch (Throwable ignored) {
+                                // App process may have died; keep reading.
+                            }
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                // fd closed during stop() — expected shutdown path.
+            }
+        });
+        t.setName("evdev-touchpad");
+        t.setDaemon(true);
+        t.start();
     }
 
 
@@ -176,6 +366,8 @@ public class ShizukuInputService extends IInputEventService.Stub {
             }
         }
         grabbedPfds.clear();
+        grabbedTouchpadPaths.clear();
+        touchpadCaptureStarted = false;
         for (FileInputStream fis : plainStreams) {
             try {
                 fis.close();

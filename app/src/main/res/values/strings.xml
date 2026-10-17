@@ -534,6 +534,8 @@
     <string name="summary_trackpad_drag_drop_vibration">Enables vibration feedback for drag-and-drop actions on Samsung trackpad devices.</string>
     <string name="title_trackpad_drag_drop_threshold">Hold Duration for Drag-and-Drop Activation on Trackpad</string>
     <string name="summary_trackpad_drag_drop_threshold">Set the duration to hold on the trackpad before activating drag-and-drop on Samsung devices.</string>
+    <string name="title_checkbox_trackpad_raw_evdev">Read the touchpad directly</string>
+    <string name="summary_checkbox_trackpad_raw_evdev">Grabs the physical touchpad through Shizuku and reads raw finger contacts, restoring two-finger scrolling feel, pinch zoom and three/four-finger gestures on Android 17 / ColorOS 17 (which no longer delivers multi-finger touchpad events to apps). Requires the Shizuku keyboard capture mode.</string>
     <string name="title_trackpad_swap_axis">Swap X and Y axis of the trackpad input</string>
     <string name="summary_trackpad_swap_axis">On some devices, trackpad input may be rotated in axis. Enabling this option may help.</string>
     <string name="title_checkbox_force_qwerty">Force QWERTY layout</string>
