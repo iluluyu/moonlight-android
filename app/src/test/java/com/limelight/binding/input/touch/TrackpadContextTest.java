@@ -109,10 +109,10 @@ public class TrackpadContextTest {
         context.setPointerCount(1);
 
         context.touchDownEvent(100, 100, 1_000, true);
-        context.touchUpEvent(100, 100, 1_020);
+        context.touchUpEvent(100, 100, 1_060);
         context.stopFling();
         context.touchDownEvent(100, 100, 1_080, true);
-        context.touchUpEvent(100, 100, 1_100);
+        context.touchUpEvent(100, 100, 1_140);
 
         verify(connection, times(2)).sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
         verify(connection, times(2)).sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
@@ -125,7 +125,7 @@ public class TrackpadContextTest {
         context.setPointerCount(2);
 
         context.touchDownEvent(100, 100, 1_000, true);
-        context.touchUpEvent(100, 100, 1_020);
+        context.touchUpEvent(100, 100, 1_060);
         context.cancelTouch();
 
         verify(connection).sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
@@ -140,7 +140,7 @@ public class TrackpadContextTest {
         context.setPointerCount(2);
 
         context.touchDownEvent(100, 100, 1_000, true);
-        context.touchUpEvent(100, 100, 1_020);
+        context.touchUpEvent(100, 100, 1_060);
         context.touchDownEvent(100, 100, 1_080, true);
         context.touchMoveEvent(120, 100, 1_220);
         context.setPointerCount(1);

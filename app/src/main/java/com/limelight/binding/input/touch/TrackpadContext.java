@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 
+import com.limelight.BuildConfig;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.input.MouseButtonPacket;
 
@@ -48,6 +49,10 @@ public class TrackpadContext implements TouchContext {
     private final int actionIndex;
     private final Handler handler;
 
+    /** EventTime of the most recent frame that carried two or more contacts. */
+    private long lastMultiFingerMs = 0;
+    /** EventTime-based deadline before which tap synthesis is suppressed. */
+    private long tapBlockedUntilMs = 0;
     private boolean swapAxis = false;
     private float sensitivityX = 1;
     private float sensitivityY = 1;
@@ -56,6 +61,18 @@ public class TrackpadContext implements TouchContext {
     private static final int TAP_MOVEMENT_THRESHOLD = 10; // px per axis
     private static final int TAP_TIME_THRESHOLD = 180;    // ms
     private static final int CLICK_RELEASE_DELAY = TAP_TIME_THRESHOLD;
+    /** A deliberate tap needs a real contact phase. Shorter contacts are pad blips or
+     *  contact churn while two fingers are being placed/lifted. */
+    private static final int TAP_MIN_DURATION_MS = 30;
+    /** No tap may fire when a multi-finger contact existed this recently. Real trackpads
+     *  report brief slot dropouts while scrolling (one finger's slot disappears for a
+     *  frame, then comes back), and the raw evdev bridge forwards that churn as extra
+     *  DOWN/UP pairs. Those re-armed single-finger tap detection in the middle of a
+     *  two-finger scroll and fired stray left clicks. */
+    private static final long TAP_AFTER_MULTI_FINGER_MS = 200;
+    /** Trailing suppression window after scroll/pinch/momentum so the finger that ends a
+     *  scroll can never be read as a click. */
+    private static final long TAP_BLOCK_AFTER_SCROLL_MS = 200;
     private static final float SCROLL_SPEED_FACTOR_X = 1.5f;
     private static final float SCROLL_SPEED_FACTOR_Y = 2f;
     // Acceleration is based on velocity rather than per-event distance. Per-event
@@ -243,17 +260,39 @@ public class TrackpadContext implements TouchContext {
         return xDelta <= TAP_MOVEMENT_THRESHOLD && yDelta <= TAP_MOVEMENT_THRESHOLD;
     }
 
-    private boolean isTap(long eventTime) {
+    private boolean isTap(long eventTime, byte button) {
         if (confirmedDrag || confirmedMove || confirmedScroll) {
             return false;
         }
 
-        if (actionIndex + 1 != maxPointerCountInGesture) {
+        long timeDelta = eventTime - originalTouchTime;
+        if (timeDelta < TAP_MIN_DURATION_MS || timeDelta > TAP_TIME_THRESHOLD) {
             return false;
         }
 
-        long timeDelta = eventTime - originalTouchTime;
-        return isWithinTapBounds(lastTouchX, lastTouchY) && timeDelta <= TAP_TIME_THRESHOLD;
+        if (eventTime < tapBlockedUntilMs) {
+            return false;
+        }
+
+        if (button == MouseButtonPacket.BUTTON_LEFT) {
+            // Left clicks are the dangerous ones. The old test
+            // (actionIndex + 1 == maxPointerCountInGesture) let the *second* finger of a
+            // two-finger gesture pass, and contact churn during a two-finger scroll
+            // re-armed tap detection with maxPointerCountInGesture == 1 - both produced
+            // stray left clicks in the middle of scrolling. A left click now requires a
+            // pure single-finger gesture with no multi-finger contact nearby.
+            if (maxPointerCountInGesture != 1) {
+                return false;
+            }
+            if (originalTouchTime - lastMultiFingerMs < TAP_AFTER_MULTI_FINGER_MS) {
+                return false;
+            }
+        } else if (maxPointerCountInGesture < 2) {
+            // Right/middle taps only make sense for a two/three-finger contact.
+            return false;
+        }
+
+        return isWithinTapBounds(lastTouchX, lastTouchY);
     }
 
     private byte getMouseButtonIndex() {
@@ -270,6 +309,11 @@ public class TrackpadContext implements TouchContext {
     /** Wraps mouse button sends to keep {@link #primaryButtonDown} in sync for the
      *  primary (left) button, so the trackpad can tell drags from scrolls. */
     private void mouseDown(byte button) {
+        if (BuildConfig.DEBUG) {
+            android.util.Log.i("ArtemisTP", "click down button=" + button
+                    + " pc=" + pointerCount + " maxPc=" + maxPointerCountInGesture
+                    + " dur=" + (SystemClock.uptimeMillis() - originalTouchTime) + "ms");
+        }
         conn.sendMouseButtonDown(button);
         if (button == MouseButtonPacket.BUTTON_LEFT) {
             primaryButtonDown = true;
@@ -318,6 +362,9 @@ public class TrackpadContext implements TouchContext {
             handler.removeCallbacks(scrollTransitionRunnable);
             isScrollTransitioning = false;
             maxPointerCountInGesture = pointerCount;
+            if (pointerCount >= 2) {
+                lastMultiFingerMs = eventTime;
+            }
             originalTouchTime = eventTime;
             cancelled = confirmedMove = confirmedScroll = false;
             distanceMoved = 0;
@@ -391,7 +438,7 @@ public class TrackpadContext implements TouchContext {
             releasePendingButton();
             confirmedDrag = false;
         }
-        else if (isTap(eventTime)) {
+        else if (isTap(eventTime, buttonIndex)) {
             mouseDown(buttonIndex);
             pendingButtonDown = buttonIndex;
             isClickPending = true;
@@ -410,6 +457,7 @@ public class TrackpadContext implements TouchContext {
             // finger lift; acceleration has already been applied while contact was down.
             double speed = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
             if (confirmedScroll && speed > SCROLL_FLICK_THRESHOLD) {
+                tapBlockedUntilMs = SystemClock.uptimeMillis() + TAP_BLOCK_AFTER_SCROLL_MS;
                 isFlicking = true;
                 lastMomentumFrameTime = SystemClock.uptimeMillis();
                 handler.postDelayed(scrollMomentumRunnable, MOMENTUM_FRAME_INTERVAL_MS);
@@ -433,6 +481,7 @@ public class TrackpadContext implements TouchContext {
             return false;
         }
 
+        tapBlockedUntilMs = SystemClock.uptimeMillis() + TAP_BLOCK_AFTER_SCROLL_MS;
         isFlicking = true;
         lastMomentumFrameTime = SystemClock.uptimeMillis();
         handler.postDelayed(scrollMomentumRunnable, MOMENTUM_FRAME_INTERVAL_MS);
@@ -626,6 +675,10 @@ public class TrackpadContext implements TouchContext {
             isScrollTransitioning = false;
         }
 
+        if (pointerCount >= 2) {
+            lastMultiFingerMs = SystemClock.uptimeMillis();
+        }
+
         if (pointerCount < this.pointerCount && confirmedDrag && !isFlicking) {
             releasePendingButton();
             confirmedDrag = false;
@@ -673,5 +726,9 @@ public class TrackpadContext implements TouchContext {
 
     private void checkForConfirmedScroll() {
         confirmedScroll = (actionIndex == 1 && pointerCount == 2 && confirmedMove);
+        if (confirmedScroll) {
+            // Ending a scroll lifts one finger; never let that lift read as a click.
+            tapBlockedUntilMs = SystemClock.uptimeMillis() + TAP_BLOCK_AFTER_SCROLL_MS;
+        }
     }
 }
