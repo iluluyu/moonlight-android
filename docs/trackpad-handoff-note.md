@@ -60,6 +60,8 @@ OPPO Pad 4 Pro 官方磁吸键盘触控板 → 远程 Windows 主机，接近 Ma
 
 35. **触点过滤（噪声/掌压/搭板拇指，真机验证通过 + 单测，2026-10-17）**：直读 evdev 绕过了框架所有触点过滤（`Change Min Move Distance`、`Finger Merge`、`Fat Finger`、palm），搭在板上的拇指会作为普通手指到位，把两指滚动变成三指手势。新增纯逻辑 `TrackpadContactFilter`（AIDL 升到 v4，帧里带 `ids`+`sizes`，size = `ABS_MT_TOUCH_MAJOR / majorMax * 1000`）：① 单触点永不丢弃；② 归一化面积 <40/1000 视为噪声，仅在有其他触点时丢弃；③ **静止 ≥500ms 且另有手指正在移动**才算“休息拇指”，且**每帧最多丢一个**（一双手只有一个拇指，多丢会把真实多指手势降级）；④ 绝不下发空帧（保底保留最久触点的那个）。踩过的坑：最初用“单帧位移 >12 单位”判静止，而慢速滑动的每帧位移恰好是 9 单位 → 一直在动的两指被判成静止、拇指反而被当唯一活动指；改为**相对锚点位移**（偏离锚点 >12 单位才重置静止计时）。另在 `Game` 里补了安全阀：过滤状态切换时 `finishThreeFingerStroke/finishFourFingerStroke + resetTrackpadContexts + 200ms 尾守卫`，否则拇指被丢弃前已武装的三指身份仍可能触发一次滑动。真机验证：`all` 回归 2 次点击/滚动/捏合/三指/四指全部正常；`thumb_scroll`（三触点、拇指静止 884ms、两指滚动）→ `stroke ended without fire` + `scroll confirm`，日志出现 `TPFILTER drop i=0 still=884ms pc=3` 便于后续标定。可调常数：`REST_MS`(500)、`REST_RADIUS`(12 pad 单位)、`NOISE_SIZE`(40)、`MIN_CONTACTS_FOR_REST_SUPPRESSION`(3)。
 
+36. **补充回归发现的两处问题（真机验证通过，2026-10-17，并入 20.2.6-oppo.3）**：① **机械按下点两次**：按键式触控板一次按下会同时上报「手指接触」+`BTN_LEFT`，接触那一路满足了轻点判据 → 单击变双击。新增 `TrackpadContext.physicalClickSuppressUntilMs`（按下期间 + 之后再 250ms 抑制轻点合成），按下→拖动仍走既有 `primaryButtonDown` 路径。② **拔插键盘后手势失效**：热插拔刷新原先按“已抓过”跳节点，但 Linux 会复用 event 次设备号（devtmpfs 连 `st_rdev` 都复用），重新插回的板被误判为已接管，形同僵死直到重启串流；现在**取消全部记账**，每次刷新都重试 `EVIOCGRAB`（独占锁天然幂等，已持有的节点返回 EBUSY 直接跳过）。真机回归补测：三指轻点/上滑/下滑、四指轻点/上滑/下滑、捏合放大与缩小、噪声级触点被过滤、双击拖拽后左键正确释放、连续两次热插拔均自动接管。调试日志新增 `TPBTN`（机械键）与 `TPHOTPLUG`（设备增删/刷新）便于复现。
+
 ## 未完成 ❌
 - **多显示器选择器定位（低优先级）**：Alt+Tab 与 Task View 的选择焦点都仍由 Windows 放在主屏，用户确认当前并不重要。保留宿主行为；若未来重新提高优先级，再设计可选宿主端 companion，不能在 Artemis 中用隐式点击抢焦点。
 - **自定义动作产品化**：当前保持单一默认语义；未来若设计动作编辑器，三指拖移、旋转、页面轻扫等不得直接硬编码进 `Game`。

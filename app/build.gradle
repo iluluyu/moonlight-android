@@ -19,7 +19,7 @@ android {
         minSdk 21
         targetSdk 34
 
-        versionName "20.2.6-oppo.4"
+        versionName "20.2.6-oppo.3"
         versionCode = 60
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
