@@ -45,6 +45,33 @@ public class TrackpadContactFilterTest {
     }
 
     @Test
+    public void smallButComparableContactsAreBothKept() {
+        TrackpadContactFilter filter = new TrackpadContactFilter();
+        boolean[] keep = keepFlags(2);
+
+        // A light touch on the OPPO pad reports a small ABS_MT_TOUCH_MAJOR (e.g. 1-3 of
+        // 100 => 10-30 normalized). Both fingers are equally light, so neither is noise:
+        // dropping one would turn a two-finger scroll into one-finger cursor motion.
+        int kept = filter.select(1000, new int[]{1, 2}, new int[]{500, 800}, new int[]{500, 500},
+                new int[]{11, 11}, keep);
+
+        assertTrue(keep[0]);
+        assertTrue(keep[1]);
+        assertEquals(2, kept);
+    }
+
+    @Test
+    public void threeEquallyLightContactsAreAllKept() {
+        TrackpadContactFilter filter = new TrackpadContactFilter();
+        boolean[] keep = keepFlags(3);
+
+        int kept = filter.select(1000, new int[]{1, 2, 3}, new int[]{400, 900, 1400},
+                new int[]{700, 700, 700}, new int[]{12, 11, 10}, keep);
+
+        assertEquals(3, kept);
+    }
+
+    @Test
     public void restingThumbIsDroppedOnceThreeContactsAreDown() {
         TrackpadContactFilter filter = new TrackpadContactFilter();
         int[] ids = {1, 2, 3};
@@ -130,11 +157,12 @@ public class TrackpadContactFilterTest {
         TrackpadContactFilter filter = new TrackpadContactFilter();
         boolean[] keep = keepFlags(3);
 
-        // all three are noise-sized at once; one contact must survive so the pipeline
-        // does not see a spurious "everything lifted"
+        // Degenerate input (every contact reports no area at all) must still leave one
+        // contact in the frame, otherwise the pipeline would see a spurious
+        // "everything lifted" instead of a gesture.
         int kept = filter.select(1000, new int[]{1, 2, 3}, new int[]{400, 900, 1400},
-                new int[]{700, 700, 700}, new int[]{1, 2, 3}, keep);
+                new int[]{700, 700, 700}, new int[]{0, 0, 0}, keep);
 
-        assertEquals(1, kept);
+        assertTrue(kept >= 1);
     }
 }

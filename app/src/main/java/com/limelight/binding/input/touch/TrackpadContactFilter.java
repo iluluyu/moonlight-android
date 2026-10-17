@@ -18,8 +18,9 @@ import java.util.Map;
  * real gestures:</p>
  * <ul>
  *   <li>A single contact is never dropped, so one-finger use is always untouched.</li>
- *   <li>A contact smaller than {@link #NOISE_SIZE} (0..1000 normalized contact area)
- *       is dropped as sensor noise only while another contact exists.</li>
+ *   <li>A contact whose normalized area is more than {@link #NOISE_AREA_RATIO}x smaller
+ *       than the largest contact in the same frame is dropped as sensor noise, so the
+ *       rule adapts to the device's own touch-major range instead of a hard-coded one.</li>
  *   <li>A contact that has been stationary for {@link #REST_MS} is treated as a
  *       resting thumb/palm, but only when at least three contacts are down <em>and</em>
  *       another contact is being moved. Holding three fingers still (about to start a
@@ -29,8 +30,13 @@ import java.util.Map;
  * </ul>
  */
 public final class TrackpadContactFilter {
-    /** Normalized contact area (0..1000) below which a contact is sensor noise. */
-    static final int NOISE_SIZE = 40;
+    /** A contact whose area is this many times smaller than the largest contact in the
+     *  same frame is sensor noise. Relative, not absolute: ABS_MT_TOUCH_MAJOR's range and
+     *  the value a light finger produces differ per device (the OPPO pad reports 0..100
+     *  and a gentle touch can be 1-3 units). An absolute threshold therefore classified a
+     *  real second finger as noise and dropped it, which turned two-finger scrolling into
+     *  one-finger cursor motion - the regression reported after the first filter release. */
+    static final int NOISE_AREA_RATIO = 4;
     /** Normalized contact area (0..1000) a resting thumb/palm is expected to exceed. */
     static final int REST_MIN_SIZE = 0;
     /** How long a contact must stay put before it counts as resting. */
@@ -101,6 +107,14 @@ public final class TrackpadContactFilter {
         int restingIndex = -1;
         long restingSince = Long.MAX_VALUE;
 
+        int maxSize = 0;
+        for (int i = 0; i < count; i++) {
+            int size = (sizes != null && i < sizes.length) ? sizes[i] : 1000;
+            if (size > maxSize) {
+                maxSize = size;
+            }
+        }
+
         int kept = 0;
         int oldestIndex = 0;
         long oldestStillSince = Long.MAX_VALUE;
@@ -110,8 +124,8 @@ public final class TrackpadContactFilter {
             int size = (sizes != null && i < sizes.length) ? sizes[i] : 1000;
             State state = stateFor(ids, i);
 
-            if (size < NOISE_SIZE) {
-                // Noise only matters when it changes the pointer count.
+            if (size * NOISE_AREA_RATIO < maxSize) {
+                // Far smaller than the biggest contact in this frame: noise, not a finger.
                 drop = true;
             } else if (anyMoving && count >= MIN_CONTACTS_FOR_REST_SUPPRESSION
                     && state != null && size >= REST_MIN_SIZE
