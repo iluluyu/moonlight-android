@@ -91,10 +91,12 @@ Keyboard capture and direct trackpad reading both rely on Shizuku:
 
 ```sh
 git submodule update --init --recursive
-# put sdk.dir and ndk.dir into app/local.properties
+# put sdk.dir and ndk.dir into app/local.properties (JDK 17 required)
 ./gradlew assembleNonRoot_gameDebug   # everyday debug build
-./gradlew assembleRelease             # release build
+./gradlew assembleNonRoot_gameRelease # release build
 ```
+
+The release checklist (versioning, signing, GitHub release, Obtainium constraints) is in [`docs/release-guide.md`](docs/release-guide.md).
 
 ## Known limitations
 

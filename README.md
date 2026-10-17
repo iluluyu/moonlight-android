@@ -91,10 +91,12 @@ Android 17（ColorOS 17）修改了触控板事件投递：pointer capture 仍�
 
 ```sh
 git submodule update --init --recursive
-# 在 app/local.properties 写入 sdk.dir 与 ndk.dir
+# 在 app/local.properties 写入 sdk.dir 与 ndk.dir（需要 JDK 17）
 ./gradlew assembleNonRoot_gameDebug   # 日常调试包
-./gradlew assembleRelease             # 发布包
+./gradlew assembleNonRoot_gameRelease # 发布包
 ```
+
+发版（版本号、签名、Release、Obtainium 链接的约束）见 [`docs/release-guide.md`](docs/release-guide.md)。
 
 ## 已知限制
 
