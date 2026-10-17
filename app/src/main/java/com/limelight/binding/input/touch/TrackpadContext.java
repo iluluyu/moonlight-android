@@ -44,6 +44,11 @@ public class TrackpadContext implements TouchContext {
      *  both trackpad contexts AND the hardware press-to-click path in Game, so that
      *  movement while the button is held drags instead of scrolling. */
     public static volatile boolean primaryButtonDown = false;
+    /** Uptime deadline before which tap synthesis is suppressed because a physical
+     *  (button-pad) click just happened. A button pad reports the finger contact *and*
+     *  BTN_LEFT for one press, so without this a real click also produced a synthetic
+     *  tap - i.e. two clicks per press. */
+    public static volatile long physicalClickSuppressUntilMs = 0;
 
     private final NvConnection conn;
     private final int actionIndex;
@@ -271,6 +276,11 @@ public class TrackpadContext implements TouchContext {
         }
 
         if (eventTime < tapBlockedUntilMs) {
+            return false;
+        }
+
+        // The finger that presses a button pad must not also produce a tap click.
+        if (primaryButtonDown || eventTime < physicalClickSuppressUntilMs) {
             return false;
         }
 

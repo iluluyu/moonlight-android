@@ -2275,7 +2275,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // longer turn it into a button event; forward it ourselves.
         boolean buttonDown = (buttonState & 1) != 0;
         if (buttonDown != evdevTouchpadButtonDown) {
+            if (BuildConfig.DEBUG) {
+                Log.i(TP_LOG_TAG, "TPBTN physical-left=" + buttonDown);
+            }
             evdevTouchpadButtonDown = buttonDown;
+            // A button pad reports one physical press as a finger contact plus BTN_LEFT;
+            // suppress tap synthesis around it so the press does not click twice.
+            TrackpadContext.physicalClickSuppressUntilMs = eventTimeMs + 250;
             if (buttonDown) {
                 conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
                 TrackpadContext.primaryButtonDown = true;
