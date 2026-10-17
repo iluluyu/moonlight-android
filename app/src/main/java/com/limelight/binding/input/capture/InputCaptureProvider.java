@@ -75,5 +75,11 @@ public abstract class InputCaptureProvider {
         return 0;
     }
 
+    /** Called by the input router when a physical-touchpad event arrives while this
+     *  provider believes it is capturing. Providers that can lose capture without a
+     *  notification (vendor input stacks) re-request it here; the call must be cheap
+     *  and self-throttling because it runs on the event path. */
+    public void repairPointerCaptureIfLost() {}
+
     public void onWindowFocusChanged(boolean focusActive) {}
 }

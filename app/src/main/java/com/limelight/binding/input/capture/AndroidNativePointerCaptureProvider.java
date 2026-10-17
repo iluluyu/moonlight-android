@@ -5,9 +5,12 @@ import android.app.Activity;
 import android.hardware.input.InputManager;
 import android.os.Build;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
+
+import com.limelight.binding.input.touch.TrackpadInputSource;
 
 
 // We extend AndroidPointerIconCaptureProvider because we want to also get the
@@ -17,6 +20,10 @@ import android.view.View;
 public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptureProvider implements InputManager.InputDeviceListener {
     private final InputManager inputManager;
     private final View targetView;
+    /** Throttles automatic re-requests so a permanently denied capture cannot turn
+     *  every incoming touchpad event into another framework round trip. */
+    private long lastCaptureRepairMs;
+    private static final long CAPTURE_REPAIR_INTERVAL_MS = 750;
 
     public AndroidNativePointerCaptureProvider(Activity activity, View targetView) {
         super(activity, targetView);
@@ -39,15 +46,23 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
                 continue;
             }
 
-            // Skip touchscreens when considering compatible capture devices.
+            // Skip pure touchscreens when considering compatible capture devices.
             // Samsung devices on Android 12 will report a sec_touchpad device
             // with SOURCE_TOUCHSCREEN, SOURCE_KEYBOARD, and SOURCE_MOUSE.
             // Upon enabling pointer capture, that device will switch to
             // SOURCE_KEYBOARD and SOURCE_TOUCHPAD.
             // Only skip on non ChromeOS devices cause the ChromeOS pointer else
             // gets disabled removing relative mouse capabilities
-            // on Chromebooks with touchscreens
-            if (device.supportsSource(InputDevice.SOURCE_TOUCHSCREEN) && !targetView.getContext().getPackageManager().hasSystemFeature("org.chromium.arc.device_management")) {
+            // on Chromebooks with touchscreens.
+            //
+            // A device that ALSO advertises SOURCE_TOUCHPAD is a keyboard touchpad
+            // sharing a node with the panel (TouchpadInputMapper reports
+            // SOURCE_MOUSE | SOURCE_TOUCHPAD on the device itself), so it must not be
+            // skipped: skipping it silently denies pointer capture and every
+            // finger-count trackpad gesture with it.
+            if (device.supportsSource(InputDevice.SOURCE_TOUCHSCREEN) &&
+                    !device.supportsSource(InputDevice.SOURCE_TOUCHPAD) &&
+                    !targetView.getContext().getPackageManager().hasSystemFeature("org.chromium.arc.device_management")) {
                 continue;
             }
 
@@ -114,9 +129,49 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
         // SOURCE_MOUSE_RELATIVE is how SOURCE_MOUSE appears when our view has pointer capture.
         // SOURCE_TOUCHPAD will have relative axes populated iff our view has pointer capture.
         // See https://developer.android.com/reference/android/view/View#requestPointerCapture()
+        //
+        // Both tests are bitmask based: TouchpadInputMapper and some vendor builds
+        // report composite sources such as SOURCE_MOUSE | SOURCE_TOUCHPAD, which never
+        // equals SOURCE_TOUCHPAD even though the event is a captured touchpad sample.
         int eventSource = event.getSource();
-        return (eventSource == InputDevice.SOURCE_MOUSE_RELATIVE && event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE) ||
-                (eventSource == InputDevice.SOURCE_TOUCHPAD && targetView.hasPointerCapture());
+        if (TrackpadInputSource.isMouseRelativeSource(eventSource)) {
+            return event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE;
+        }
+        if (TrackpadInputSource.hasTouchpadSource(eventSource)) {
+            // Relative axes are only populated for a captured touchpad. Trusting the
+            // capture flag (instead of a non-zero axis value) keeps the uncaptured
+            // gesture path out of the app's own pointer state machine, where it would
+            // double-apply the system's synthesized pointer motion.
+            return targetView.hasPointerCapture();
+        }
+        return false;
+    }
+
+    @Override
+    public void repairPointerCaptureIfLost() {
+        if (!isCapturing || isCursorVisible || !targetView.hasWindowFocus()
+                || !hasCaptureCompatibleInputDevice()) {
+            return;
+        }
+
+        if (targetView.hasPointerCapture()) {
+            return;
+        }
+
+        long now = SystemClock.uptimeMillis();
+        if (now - lastCaptureRepairMs < CAPTURE_REPAIR_INTERVAL_MS) {
+            return;
+        }
+        lastCaptureRepairMs = now;
+
+        // Pointer capture is the only thing that makes the framework deliver raw
+        // multi-finger touchpad samples (CapturedTouchpadEventConverter uses
+        // SOURCE_TOUCHPAD). Without it the system synthesizes pointer motion, wheel
+        // events and its own multi-finger gestures, so all of our finger-count
+        // gesture detection is bypassed entirely. Some vendor builds drop the capture
+        // on their own (display switch, keyboard re-dock, configuration change), so a
+        // throttled re-request driven by incoming touchpad events self-heals it.
+        targetView.requestPointerCapture();
     }
 
     @Override
@@ -144,30 +199,34 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
 
     @Override
     public float getCurrentRelativeAxisX(MotionEvent event, int pointerIndex) {
-        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-                MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
+        int axis = relativeAxisOrAbsolute(event, MotionEvent.AXIS_RELATIVE_X, MotionEvent.AXIS_X);
         return event.getAxisValue(axis, pointerIndex);
     }
 
     @Override
     public float getCurrentRelativeAxisY(MotionEvent event, int pointerIndex) {
-        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-                MotionEvent.AXIS_Y : MotionEvent.AXIS_RELATIVE_Y;
+        int axis = relativeAxisOrAbsolute(event, MotionEvent.AXIS_RELATIVE_Y, MotionEvent.AXIS_Y);
         return event.getAxisValue(axis, pointerIndex);
     }
 
     @Override
     public float getHistoricalRelativeAxisX(MotionEvent event, int pointerIndex, int historyIndex) {
-        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-                MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
+        int axis = relativeAxisOrAbsolute(event, MotionEvent.AXIS_RELATIVE_X, MotionEvent.AXIS_X);
         return event.getHistoricalAxisValue(axis, pointerIndex, historyIndex);
     }
 
     @Override
     public float getHistoricalRelativeAxisY(MotionEvent event, int pointerIndex, int historyIndex) {
-        int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-                MotionEvent.AXIS_Y : MotionEvent.AXIS_RELATIVE_Y;
+        int axis = relativeAxisOrAbsolute(event, MotionEvent.AXIS_RELATIVE_Y, MotionEvent.AXIS_Y);
         return event.getHistoricalAxisValue(axis, pointerIndex, historyIndex);
+    }
+
+    /** Captured mice report their delta in the absolute-axis slots, touchpads in the
+     *  dedicated relative-axis slots. Composite touchpad sources must keep using the
+     *  relative slots. */
+    private static int relativeAxisOrAbsolute(MotionEvent event, int relativeAxis, int absoluteAxis) {
+        return TrackpadInputSource.isMouseRelativeSource(event.getSource())
+                ? absoluteAxis : relativeAxis;
     }
 
     @Override
