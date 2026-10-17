@@ -74,7 +74,7 @@ public class ShizukuInputService extends IInputEventService.Stub {
     private final List<FileInputStream> plainStreams = new ArrayList<>();
     private volatile boolean running = false;
     private boolean touchpadCaptureStarted;
-    private final java.util.Set<String> grabbedTouchpadPaths = new java.util.HashSet<>();
+
     /** Latest callback; readers read this field so a rebind (start() called again while
      *  running, which Shizuku does) just updates the callback instead of tearing down
      *  and restarting all reader threads (which previously dropped all key events). */
@@ -182,11 +182,11 @@ public class ShizukuInputService extends IInputEventService.Stub {
                 continue;
             }
 
+            // No bookkeeping of "already grabbed" nodes: Linux reuses event minors (and
+            // devtmpfs rdevs), so path- or identity-keyed sets made a hotplugged pad look
+            // already-grabbed. EVIOCGRAB is exclusive, so simply retrying is idempotent -
+            // a node we already hold fails with EBUSY and is skipped.
             final String path = dev.getAbsolutePath();
-            if (grabbedTouchpadPaths.contains(path)) {
-                continue;
-            }
-
             int fd = nativeOpenTouchpadGrabbed(path);
             if (fd < 0) {
                 continue;
@@ -204,11 +204,11 @@ public class ShizukuInputService extends IInputEventService.Stub {
 
             ParcelFileDescriptor pfd = ParcelFileDescriptor.adoptFd(fd);
             grabbedPfds.add(pfd);
-            grabbedTouchpadPaths.add(path);
             startTouchpadReader(new FileInputStream(pfd.getFileDescriptor()), path,
                     absInfo[0], absInfo[1], absInfo[2]);
             Log.i(TAG, "touchpad grabbed " + path + " xMax=" + absInfo[0]
-                    + " yMax=" + absInfo[1] + " majorMax=" + absInfo[2]);
+                    + " yMax=" + absInfo[1] + " majorMax=" + absInfo[2]
+                    + " active=" + grabbedPfds.size());
             // Keep going: OPPO exposes the same physical pad twice (pogo_touchpad and
             // the "Keyboard Touchpad" framework node). Both must be grabbed so the
             // system stops acting on either; the app de-duplicates identical frames.
@@ -366,7 +366,6 @@ public class ShizukuInputService extends IInputEventService.Stub {
             }
         }
         grabbedPfds.clear();
-        grabbedTouchpadPaths.clear();
         touchpadCaptureStarted = false;
         for (FileInputStream fis : plainStreams) {
             try {

@@ -2140,6 +2140,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private final Runnable evdevTouchpadRefreshRunnable = new Runnable() {
         @Override
         public void run() {
+            if (BuildConfig.DEBUG) {
+                Log.i(TP_LOG_TAG, "TPHOTPLUG refresh backend="
+                        + (shizukuInputBackend != null) + " enabled=" + evdevTouchpadCaptureEnabled);
+            }
             if (shizukuInputBackend != null) {
                 shizukuInputBackend.refreshTouchpadCapture();
             }
@@ -2421,11 +2425,17 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             evdevTouchpadDeviceListener = new InputManager.InputDeviceListener() {
                 @Override
                 public void onInputDeviceAdded(int deviceId) {
+                    if (BuildConfig.DEBUG) {
+                        Log.i(TP_LOG_TAG, "TPHOTPLUG add id=" + deviceId);
+                    }
                     scheduleEvdevTouchpadRefresh(300);
                 }
 
                 @Override
                 public void onInputDeviceRemoved(int deviceId) {
+                    if (BuildConfig.DEBUG) {
+                        Log.i(TP_LOG_TAG, "TPHOTPLUG remove id=" + deviceId);
+                    }
                     scheduleEvdevTouchpadRefresh(300);
                 }
 

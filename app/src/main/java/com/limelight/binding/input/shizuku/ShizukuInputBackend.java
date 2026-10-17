@@ -81,7 +81,7 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
      *  without this a developer build (same versionCode) kept running the previous
      *  process - which then held the touchpad grab with old code and silently ignored
      *  new AIDL calls. */
-    private static final int SERVICE_PROTOCOL_VERSION = 4;
+    private static final int SERVICE_PROTOCOL_VERSION = 6;
 
     private volatile boolean started = false;
     private volatile boolean active = false;
@@ -168,8 +168,11 @@ public class ShizukuInputBackend extends IInputEventCallback.Stub {
     /** Retry grabbing touchpads that are not grabbed yet (hotplug, transient EBUSY). */
     public synchronized void refreshTouchpadCapture() {
         if (!started || service == null) {
+            LimeLog.info("ShizukuInputBackend: refresh skipped started=" + started
+                    + " service=" + (service != null));
             return;
         }
+        LimeLog.info("ShizukuInputBackend: refreshTouchpadCapture()");
         try {
             service.refreshTouchpadCapture();
         } catch (Exception e) {
