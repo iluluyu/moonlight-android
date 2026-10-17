@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="330" viewBox="0 0 960 330" role="img">
+  <rect width="960" height="330" rx="14" fill="#f6f8fa"/>
+  <text x="28" y="32" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="700" fill="#1f2328">有线优先：只把串流流量绑到有线网卡</text>
+  <rect x="28" y="60" width="250" height="96" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="153" y="84" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="600" fill="#1f2328">App 默认网络（系统）</text>
+  <text x="153" y="108" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#57606a">Wi-Fi 保持连接</text>
+  <rect x="28" y="186" width="250" height="96" rx="10" fill="#eef7f1" stroke="#7cc4a0" stroke-width="1.5"/>
+  <text x="153" y="210" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="600" fill="#1f2328">串流进程绑定</text>
+  <text x="153" y="234" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#57606a">bindProcessToNetwork(eth)</text>
+  <rect x="372" y="60" width="236" height="96" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="490" y="84" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="600" fill="#1f2328">Wi-Fi / 蜂窝</text>
+  <text x="490" y="108" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#57606a">主机发现 · 其他流量</text>
+  <rect x="372" y="186" width="236" height="96" rx="10" fill="#ffffff" stroke="#7cc4a0" stroke-width="1.5"/>
+  <text x="490" y="210" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="600" fill="#1f2328">有线网卡（USB-C / 扩展坞）</text>
+  <text x="490" y="234" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#57606a">eth0 · 千兆内网</text>
+  <rect x="716" y="122" width="216" height="100" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="824" y="146" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="600" fill="#1f2328">串流主机</text>
+  <text x="824" y="170" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#57606a">Apollo / Sunshine</text>
+  <line x1="280" y1="108" x2="368" y2="108" stroke="#57606a" stroke-width="1.8" marker-end="none"/>
+  <polygon points="368,108 360.79224905678063,111.47106991294046 360.79224905678063,104.52893008705954" fill="#57606a"/>
+  <line x1="280" y1="234" x2="368" y2="234" stroke="#1a7f37" stroke-width="1.8" marker-end="none"/>
+  <polygon points="368,234 360.79224905678063,237.47106991294046 360.79224905678063,230.52893008705954" fill="#1a7f37"/>
+  <line x1="610" y1="234" x2="712" y2="200" stroke="#1a7f37" stroke-width="1.8" marker-end="none"/>
+  <polygon points="712,200 706.2597757479174,205.57223703155228 704.0644783794025,198.98634492600775" fill="#1a7f37"/>
+  <line x1="610" y1="108" x2="712" y2="146" stroke="#afb8c1" stroke-width="1.8" marker-end="none" stroke-dasharray="6 5"/>
+  <polygon points="712,146 704.0339636762693,146.73638664368903 706.4575273296126,140.23103157418856" fill="#afb8c1"/>
+  <text x="660" y="128" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="10.5" font-weight="400" fill="#57606a">发现 / 配对</text>
+  <text x="660" y="262" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="10.5" font-weight="400" fill="#1a7f37">视频 / 音频 / 输入</text>
+  <text x="28" y="310" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="400" fill="#57606a">bionic 的 socket()/connect() 会应用进程默认网络，因此 moonlight-common-c 的原生 socket 也走有线。</text>
+</svg>
